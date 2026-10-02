@@ -1,0 +1,58 @@
+{
+  "name": "dsh-budget-watcher",
+  "version": "0.3.0",
+  "description": "DeepSeek Harness plugin: a small floating window over the conversation showing the balance left on your API account, and what recent turns actually cost.",
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "~3.18.4"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "balance",
+    "budget",
+    "credits",
+    "quota",
+    "topped-up-balance"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.cjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NeutronStar714/dsh-budget-watcher.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NeutronStar714/dsh-budget-watcher/issues"
+  },
+  "homepage": "https://github.com/NeutronStar714/dsh-budget-watcher#readme"
+}

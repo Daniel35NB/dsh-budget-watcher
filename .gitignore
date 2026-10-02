@@ -1,0 +1,14 @@
+# Nothing here is generated, and nothing here is needed to run the plugin.
+node_modules/
+pnpm-lock.yaml
+package-lock.json
+
+# Editor and OS noise.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Local scratch: a config overlay used while developing against a real profile.
+cordis.patch.local.yml

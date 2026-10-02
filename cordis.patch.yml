@@ -1,0 +1,11 @@
+# Bundle patch for dsh-budget-watcher.
+#
+# `name` must be the published package name: the loader imports this specifier.
+# `id` is the handle a user targets to disable or reconfigure the plugin from
+# their own profile patch:
+#
+#   - id: budget-watcher
+#     disabled: true
+- insert:
+    - id: budget-watcher
+      name: dsh-budget-watcher
