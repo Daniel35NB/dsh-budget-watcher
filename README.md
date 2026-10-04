@@ -3,8 +3,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin that floats a small
-window over the conversation showing **how much balance is left on your API account** — and **what the turns
-you just ran actually cost**.
+window over the conversation showing **how much balance is left on your API account**, **what the turns
+you just ran actually cost** and **how fast is your balance decreasing when performing different tasks**.
 
 ![The expanded panel floating over a conversation](docs/screenshotnew.png)
 
