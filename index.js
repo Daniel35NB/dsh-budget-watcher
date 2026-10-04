@@ -20,7 +20,9 @@
 
 import { describeHttpFailure, normalizeBalance, pickWallet } from "./lib/balance.js";
 import { COST_CURRENCIES, normalizeCostCurrency } from "./lib/cost.js";
+import { createFxCache, parseFxSetting } from "./lib/fx.js";
 import { createCostLedger } from "./lib/ledger.js";
+import { createPriceBook } from "./lib/pricing.js";
 
 /** Base path for this plugin's routes. Owned by the plugin, outside `/api`. */
 const ROUTE_BASE = "/dsh-budget-watcher";
@@ -110,6 +112,18 @@ export const Config = Schema?.object({
   burnWindowMs: Schema.natural().min(MIN_BURN_WINDOW_MS).default(DEFAULT_BURN_WINDOW_MS).description(`Window for the live burn rate, in milliseconds (minimum ${MIN_BURN_WINDOW_MS}). Short by design: this is the figure that catches a sudden loss, so it is sensitive rather than smooth.`),
   burnWarnPerHour: Schema.number().min(0).default(DEFAULT_BURN_WARN_PER_HOUR).description("Per-hour spend above which the panel turns amber. In the balance's own currency (CNY for a CNY account, USD for a USD one). 0 disables the warning."),
   terminateAbovePerHour: Schema.number().min(0).default(DEFAULT_TERMINATE_PER_HOUR).description("Per-hour spend above which the running turn is interrupted, exactly as if you pressed stop. In the balance's own currency. 0 disables it, and 0 is the default: interrupting a task is destructive and the rate is an estimate, so it has to be asked for deliberately."),
+  // Deliberately untyped.
+  //
+  // This field is either the string `auto` or a number, so `Schema.string()` looks
+  // right — but a validation failure here does not degrade a feature, it stops the
+  // plugin activating at all: cordis refuses the fiber, the route is never
+  // registered, and the panel reports that it cannot reach dsh. A config row of
+  // `usdToCny: 7.2` is a YAML number, and that took the whole plugin offline.
+  //
+  // So the schema accepts anything, and `parseFxSetting` is the real gate: `auto`
+  // or a positive number, and anything else falls back to `auto`. A loose type is
+  // the right trade when the failure mode is "the plugin disappears".
+  usdToCny: Schema.any().default("auto").description("Exchange rate for models priced in USD by a third party. `auto` fetches the European Central Bank's daily reference rate; a number (for example `7.2`) uses that rate instead and makes no network request. Only DeepSeek publishes CNY prices, so this is what lets every other provider's cost appear in a CNY total."),
 });
 
 /**
@@ -357,6 +371,9 @@ function resolveSettings(rawConfig) {
     burnWindowMs: Number.isFinite(Number(config.burnWindowMs)) ? Math.max(MIN_BURN_WINDOW_MS, Math.trunc(Number(config.burnWindowMs))) : DEFAULT_BURN_WINDOW_MS,
     burnWarnPerHour: Number.isFinite(Number(config.burnWarnPerHour)) ? Math.max(0, Number(config.burnWarnPerHour)) : DEFAULT_BURN_WARN_PER_HOUR,
     terminateAbovePerHour: Number.isFinite(Number(config.terminateAbovePerHour)) ? Math.max(0, Number(config.terminateAbovePerHour)) : DEFAULT_TERMINATE_PER_HOUR,
+    // Kept as the raw value: it is either the string "auto" or something numeric,
+    // and parseFxSetting is what decides, in one place.
+    usdToCny: config.usdToCny === undefined || config.usdToCny === null ? "auto" : config.usdToCny,
   };
 }
 
@@ -590,6 +607,7 @@ const EDITABLE = {
   allowNonLoopback: "boolean",
   costEnabled: "boolean",
   graphEnabled: "boolean",
+  usdToCny: "string",
   burnWindowMs: "number",
   burnWarnPerHour: "number",
   terminateAbovePerHour: "number",
@@ -614,6 +632,7 @@ function settingsPayload(settings, extras) {
       allowNonLoopback: settings.allowNonLoopback,
       costEnabled: settings.costEnabled,
       graphEnabled: settings.graphEnabled,
+      usdToCny: String(settings.usdToCny ?? "auto"),
       burnWindowMs: settings.burnWindowMs,
       burnWarnPerHour: settings.burnWarnPerHour,
       terminateAbovePerHour: settings.terminateAbovePerHour,
@@ -767,11 +786,63 @@ function apply(ctx, config) {
   // wallet, which meant picking USD on a CNY-only account silently did nothing.)
   const costCurrencyNow = () =>
     settings.currency === "auto" ? normalizeCostCurrency(reader.state().featured?.currency) : normalizeCostCurrency(settings.currency);
+
+  // Prices for everything DeepSeek does not publish, and the rate that lets a
+  // USD-only price appear in a CNY total. Both are cheap and both degrade to
+  // "unknown" rather than to a made-up number: an unpriced turn is visible on the
+  // panel, a wrongly priced one is not.
+  //
+  // `usdToCny` is one field with two modes. `auto` fetches the ECB's daily rate;
+  // a number means use it and make no network request at all, which is the right
+  // answer behind a proxy or when you want the rate you were actually billed at.
+  const fxSetting = parseFxSetting(settings.usdToCny);
+  const fx = createFxCache({ fallback: fxSetting.fallback, enabled: fxSetting.enabled });
+  const priceBook = createPriceBook({});
+
+  // Keep both current on a timer, not only when a poll happens to arrive.
+  //
+  // Two reasons this is a timer rather than just the request path. A collapsed
+  // panel stops polling, so a request-driven refresh would let the rate go stale
+  // for as long as the pill stayed collapsed. And the first poll after a TTL
+  // expires would otherwise answer from the old rate, with only the *next* one
+  // fresh. The tick is shorter than either TTL, so it is a no-op almost always —
+  // both caches decide, and neither will fetch more often than its own TTL.
+  const PRICING_TICK_MS = 15 * 60 * 1000;
+  const pricingTimer = settings.costEnabled
+    ? setInterval(() => {
+        void fx.resolve();
+        void priceBook.refresh();
+      }, PRICING_TICK_MS)
+    : undefined;
+  // A pending interval keeps the Node process alive; unref so the plugin cannot
+  // hold DSH open by itself.
+  pricingTimer?.unref?.();
+
+  /**
+   * The currency, the prices, and a key that changes whenever either does.
+   *
+   * The key is what keeps the ledger honest: folds are cached per session, and a
+   * fold done against yesterday's rate or an older model list has to be redone
+   * rather than served.
+   */
+  const getPricing = () => {
+    const currency = costCurrencyNow();
+    const rate = fx.snapshot();
+    const book = priceBook.snapshot();
+    const usdToCny = rate?.usdToCny ?? 0;
+    return {
+      currency,
+      key: `${currency}|${usdToCny}|${book.fetchedAt ?? "none"}`,
+      lookup: (model) => priceBook.lookup(model, { currency, usdToCny }),
+    };
+  };
+
   const ledger = settings.costEnabled
     ? createCostLedger({
         getSessions: () => liveSessionsOf(ctx),
         windowMs: settings.burnWindowMs,
         getCurrency: costCurrencyNow,
+        getPricing,
       })
     : undefined;
 
@@ -817,6 +888,20 @@ function apply(ctx, config) {
           ctx.logger?.warn?.(`[${name}] balance refresh failed: ${String(error)}`);
         }
 
+        // Deliberately not awaited. Both are TTL-guarded, so this is a no-op on
+        // almost every poll; on the first one it starts the fetches and the panel
+        // prices third-party models a poll or two later rather than making this
+        // request wait on a stranger's server. `?refresh=1` — the button — does
+        // wait, because the user asked.
+        if (ledger !== undefined) {
+          if (force) {
+            await Promise.all([fx.resolve(true), priceBook.refresh(true)]);
+          } else {
+            void fx.resolve();
+            void priceBook.refresh();
+          }
+        }
+
         const state = { ...reader.state(), pluginVersion: PLUGIN_VERSION };
         let cost;
         if (ledger === undefined) {
@@ -833,6 +918,20 @@ function apply(ctx, config) {
             // A silent absence is indistinguishable from a bug, so the payload
             // says why there are no figures instead of omitting the key.
             cost = summary === undefined ? { available: false, reason: "no-live-sessions" } : costPayload(summary, settings, state.featured);
+            // Where the prices came from, and how old they are. A cost figure is
+            // only as trustworthy as its rate card, and "unknown" is a legitimate
+            // answer worth showing rather than hiding.
+            const rate = fx.snapshot();
+            const book = priceBook.snapshot();
+            cost.pricing = {
+              usdToCny: rate?.usdToCny ?? null,
+              usdToCnySource: rate?.source ?? null,
+              usdToCnyDate: rate?.date ?? null,
+              usdToCnyStale: rate?.stale ?? null,
+              thirdPartyModels: book.fetched,
+              thirdPartyFetchedAt: book.fetchedAt,
+              thirdPartyStale: book.stale,
+            };
           } catch (error) {
             // Cost is an addition to the balance, never a reason to fail it.
             ctx.logger?.warn?.(`[${name}] cost estimate failed: ${String(error)}`);
@@ -920,6 +1019,7 @@ function apply(ctx, config) {
   });
 
   ctx.effect(() => () => {
+    if (pricingTimer !== undefined) clearInterval(pricingTimer);
     reader.dispose();
     ledger?.dispose();
   });

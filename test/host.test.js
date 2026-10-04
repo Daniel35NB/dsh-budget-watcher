@@ -8,6 +8,7 @@
 // about a mock of it.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, test } from "node:test";
 
 import { apply } from "../index.js";
@@ -95,7 +96,52 @@ function stubFetch(handler) {
   return calls;
 }
 
+/**
+ * Only the balance requests.
+ *
+ * The plugin also fetches a price list and an exchange rate, on their own TTLs.
+ * Those are different upstreams from the one these tests are about, and counting
+ * them together would make "one request serves every window" meaningless.
+ */
+const balanceOnly = (calls) => calls.filter((call) => call.url.includes("/user/balance"));
+
 const json = (payload, status = 200) => new Response(JSON.stringify(payload), { status });
+
+test("a numeric usdToCny is accepted and reported, not rejected", async () => {
+  // The bug this locks out: `usdToCny: 7.2` in YAML is a *number*, the schema said
+  // string, cordis refused the fiber, the route was never registered, and the panel
+  // reported that it could not reach dsh. A validation failure on this one field
+  // costs the entire plugin, not one feature.
+  const harness = makeHarness();
+  harness.state.credential = { value: "sk-test", source: "file" };
+  stubFetch(() => json(DOCUMENTED));
+  apply(harness.ctx, { usdToCny: 7.2 });
+
+  const { body } = await request(harness.routes.get(STATE_PATH));
+  assert.equal(body.settings.effective.usdToCny, "7.2", "a number becomes the rate in force");
+  assert.equal(body.ok, true, "and the plugin is running at all, which is the real assertion");
+});
+
+test("a string usdToCny works too, including auto and the default", async () => {
+  for (const [input, expected] of [["auto", "auto"], ["7.2", "7.2"], [undefined, "auto"]]) {
+    const harness = makeHarness();
+    harness.state.credential = { value: "sk-test", source: "file" };
+    stubFetch(() => json(DOCUMENTED));
+    apply(harness.ctx, input === undefined ? {} : { usdToCny: input });
+    const { body } = await request(harness.routes.get(STATE_PATH));
+    assert.equal(body.settings.effective.usdToCny, expected, `usdToCny ${JSON.stringify(input)}`);
+  }
+});
+
+test("the usdToCny schema is deliberately loose, because a strict one takes the plugin offline", () => {
+  // The schema cannot be exercised from here — schemastery is a peer dependency the
+  // plugin does not install — so this asserts the declaration itself. A coarse guard,
+  // but the failure it prevents is total: a rejected config does not degrade the cost
+  // feature, it stops the plugin mounting and the panel loses its host.
+  const source = readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  assert.match(source, /usdToCny: Schema\.any\(\)\.default\("auto"\)/, "must accept both `auto` and a number");
+  assert.doesNotMatch(source, /usdToCny: Schema\.string\(\)/, "Schema.string() rejected `usdToCny: 7.2` and killed the plugin");
+});
 
 test("the bundled route serves the normalized topped-up balance", async () => {
   const harness = makeHarness();
@@ -137,7 +183,7 @@ test("one upstream request serves every read inside the freshness window", async
   await request(harness.routes.get(STATE_PATH));
   await request(harness.routes.get(STATE_PATH));
   await request(harness.routes.get(STATE_PATH));
-  assert.equal(calls.length, 1, "a poll from each open window must not multiply upstream traffic");
+  assert.equal(balanceOnly(calls).length, 1, "a poll from each open window must not multiply upstream traffic");
 });
 
 test("?refresh=1 bypasses the freshness window", async () => {
@@ -148,7 +194,7 @@ test("?refresh=1 bypasses the freshness window", async () => {
 
   await request(harness.routes.get(STATE_PATH));
   await request(harness.routes.get(STATE_PATH), { url: `${STATE_PATH}?refresh=1` });
-  assert.equal(calls.length, 2);
+  assert.equal(balanceOnly(calls).length, 2);
 });
 
 test("a rejected key becomes a renderable state, not an exception", async () => {
@@ -179,7 +225,7 @@ test("a missing key is reported without touching the network", async () => {
   assert.equal(body.ok, false);
   assert.equal(body.error.code, "no-key");
   assert.match(body.error.message, /DEEPSEEK_API_KEY/);
-  assert.equal(calls.length, 0);
+  assert.equal(balanceOnly(calls).length, 0, "a missing key must not produce a balance request");
 });
 
 test("a failed refresh keeps the last good balance and marks it stale", async () => {
@@ -498,7 +544,12 @@ test("a broken sessions service costs the cost block, not the balance", async ()
   assert.equal(status, 200);
   assert.equal(body.ok, true);
   assert.equal(body.featured.toppedUp, "100.00");
-  assert.deepEqual(body.cost, { available: false, reason: "no-live-sessions" });
+  assert.equal(body.cost.available, false);
+  assert.equal(body.cost.reason, "no-live-sessions");
+  // The pricing provenance rides along even with no figures, because "the rate is
+  // unknown" is a normal state worth reporting rather than an absence.
+  assert.equal(body.cost.pricing.usdToCny, null, "no rate has been fetched on this path");
+  assert.equal(typeof body.cost.pricing.thirdPartyModels, "number");
 });
 
 test("the payload carries the plugin version, so a stale module is visible", async () => {

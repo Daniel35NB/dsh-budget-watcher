@@ -970,7 +970,11 @@ test("the settings tab renders the running configuration as editable fields", as
   assert.doesNotMatch(text, /Refresh interval \(seconds\)/);
   assert.match(text, /Save/);
   // The currency is a closed set, because DeepSeek only publishes rates in two.
-  assert.doesNotMatch(text, /USD \u2192 CNY rate/, "no exchange rate is needed or offered");
+  // The exchange rate is back, as one field with two modes: `auto` fetches a
+  // central-bank rate, a number uses that instead and stops asking anyone. It
+  // stopped being "not needed" the moment third-party models arrived, because
+  // only DeepSeek publishes CNY prices.
+  assert.match(text, /USD \u2192 CNY rate \(auto, or a number\)/, "the rate is offered, and says both modes");
 
   // Durations are shown in the units a person thinks in, and the values live in
   // the inputs rather than in the text.

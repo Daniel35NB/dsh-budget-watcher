@@ -241,6 +241,7 @@ A patch replaces the row's whole `config` object, so keep every override togethe
 | `burnWindowMs` | `15000` | Window for the **live** burn rate, in milliseconds (minimum `5000`). Short on purpose: this is the figure that catches a sudden loss. |
 | `burnWarnPerHour` | `2` | Per-hour spend above which the panel turns amber, in the balance's currency. `0` disables the warning. |
 | `terminateAbovePerHour` | `0` | Per-hour spend above which the **running turn is interrupted**, in the balance's currency. `0` — the default — disables it. |
+| `usdToCny` | `auto` | Exchange rate for models priced in USD by a third party. `auto` fetches the European Central Bank's daily reference rate; a number (`7.2`) uses that rate and makes no network request. Defaults to `auto`. |
 
 There is no exchange-rate setting, because there is no exchange rate: costs are priced from DeepSeek's
 **published CNY or USD rate card**, matching whichever currency the featured balance is held in. See
@@ -589,6 +590,30 @@ Recorded honestly, because each one is a decision rather than an oversight.
     turns`. Nothing else in the panel can widen it: the chart is deliberately prevented from contributing its own
     intrinsic width, and the balance and header are shorter. If that row grows, the panel grows with it.
 
+### Third-party pricing
+
+56. **Prices for other providers come from a third party's list, not from your invoice.** They are read from
+    OpenRouter's public model list, and for a model routed through OpenRouter they can carry its margin. Treat
+    every figure that did not come from DeepSeek as an estimate of list price, which is what the `≈` is for.
+57. **DeepSeek is never priced from that list.** OpenRouter lists `deepseek/deepseek-v4.1-flash` at $0.003/M
+    input where DeepSeek's own published off-peak rate is $0.15/M — 50× apart. DeepSeek's own table wins, and
+    the fetched list is not even consulted for a model DeepSeek publishes.
+58. **A Chinese provider's own CNY prices are not used, because they cannot be read.** GLM's pricing page is a
+    JavaScript shell with 127 characters of visible text and Kimi's numbers are not in its static HTML either,
+    so those models are priced in USD from the fetched list and converted. A hand-copied CNY snapshot would go
+    stale silently, which is worse than a rate that is at least dated and visible.
+59. **The exchange rate is a central-bank reference rate, not what you are billed at.** `usdToCny: auto` uses
+    the ECB's daily file, which is published on business days and quoted against the euro — so USD→CNY is a
+    *cross* rate, not the PBOC's 中间价. Card spreads and a provider's own conversion both move the real number,
+    and a mid-market rate cannot know about either. Set a number in `usdToCny` to use the rate you were actually
+    charged instead; that also stops the plugin making any request for a rate.
+60. **An unfetchable price leaves the turn unpriced, never converted at a guess.** If the rate or the model list
+    is unavailable, the model lands in `N turn(s) unpriced` and the payload's `cost.pricing` says which of the
+    two is missing. A wrong price is invisible on the panel; a missing one is not.
+61. **The fetched list and the rate are cached on their own timers**, a day and half a day respectively, and a
+    failed fetch backs off rather than retrying on every poll. So a price change is picked up within a day, not
+    immediately — and DeepSeek's own table, which is bundled, is still only as fresh as `PRICING_READ_ON`.
+
 ## Verified against
 
 - DSH `0.2.0-rc.2` on Windows, installed with `dsh plugin --profile <name> add link:<path>`.
@@ -609,7 +634,7 @@ Recorded honestly, because each one is a decision rather than an oversight.
   `$0.1236`, matching the published rates to the cent.
 - A real settings write end to end: `POST /dsh-budget-watcher/config` on a running profile put the row's
   `config` into that profile's `cordis.patch.yml`, and re-reading the payload showed the new values effective.
-- `node --test`, **131 tests** covering the payload normalizer, the cost model and **both rate cards**, the
+- `node --test`, **160 tests** covering the payload normalizer, the cost model and **both rate cards**, the
   session ledger (fan-out, descendants, finish-must-not-subtract, wrong-session isolation, per-turn burn,
   frozen duration and **the windowed burn series**), the route (caching, single flight, `?refresh=1`, the fence,
   the config write, the cost payload, **the terminate path firing once and only once**, every failure mode) and
@@ -617,7 +642,15 @@ Recorded honestly, because each one is a decision rather than an oversight.
   burn, the settings form's scroll container and pinned Save, **the chart's polyline, thresholds, on/off switch,
   the absence of a stop line at `0`, the caption fills, the one-precision axis, the axis-origin anchor and the
   containment that stops the chart widening the panel**, **the combined turn/session row**, **the poll cadence
-  being seconds rather than the 60 s balance window**, rendering per host state, unmount cleanup).
+  being seconds rather than the 60 s balance window**, rendering per host state, unmount cleanup). The
+  multi-provider layer adds its own: the ECB cross-rate arithmetic and its sanity band, the fallback order when a
+  fetch fails, the failure backoff and that concurrent callers still share one attempt, OpenRouter's per-token
+  prices becoming a per-million card, a bare model name resolving against vendor-prefixed ids, a bundled price
+  beating a fetched one, and **a price change invalidating a cached fold**.
+- **Pricing sources probed against the live services, not assumed**: the ECB file returned a USD→CNY cross rate
+  of 6.7046 for 2026-10-02 (and DeepSeek's own published CNY/USD pairs imply ~6.67, so the two agree inside 1%),
+  and OpenRouter returned 466 models covering every provider named here. The same probe is how the claim that
+  Kimi's pricing page was readable got corrected — it is not, and neither is GLM's.
 - **Two real browser screenshots** of the running panel. The first found the fixed-size chart, the invisible
   black threshold caption and the mixed-precision axis. The second found that the chart was still setting the
   panel's width: `<svg>` is a replaced element with a 300×150 intrinsic size, so its default width — not the

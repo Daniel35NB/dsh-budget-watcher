@@ -74,6 +74,44 @@ test("the ledger sums a root session on its own", () => {
   assert.equal(summary.thisTurn.burnPerHour.toFixed(2), "4.50");
 });
 
+test("a change of prices refolds the log, so an old rate card is never served", () => {
+  // The expensive failure this prevents: fold once with yesterday's rate, cache it
+  // per session, and then keep reporting yesterday's money because the log itself
+  // did not change. The pricing key is what makes a price change invalidate the fold.
+  const root = makeSession({ id: "s-root", events: [message(1, FRI("12:00"), { inputTokens: 1_000_000, model: "claude-sonnet-5.5" })] });
+  let rate = 2;
+  const ledger = createCostLedger({
+    getSessions: () => [root],
+    windowMs: 15 * 60 * 1000,
+    getPricing: () => ({
+      currency: "USD",
+      key: `rate-${rate}`,
+      lookup: () => ({ cacheHit: 0, cacheMiss: rate, output: 0, source: "test" }),
+    }),
+  });
+
+  assert.equal(ledger.summary({ nowMs: FRI("12:01") }).session.cost, 2, "1M tokens at $2/M");
+
+  // Same session, same seq, different price.
+  rate = 5;
+  assert.equal(ledger.summary({ nowMs: FRI("12:01") }).session.cost, 5, "the new rate is used, not the cached fold");
+});
+
+test("a non-DeepSeek model is priced when the ledger is given a book", () => {
+  const root = makeSession({ id: "s-root", events: [message(1, FRI("12:00"), { inputTokens: 1_000_000, model: "glm-4.6" })] });
+  const withBook = createCostLedger({
+    getSessions: () => [root],
+    windowMs: 15 * 60 * 1000,
+    getPricing: () => ({ currency: "CNY", key: "k", lookup: () => ({ cacheHit: 0.1, cacheMiss: 2, output: 8, source: "bundled" }) }),
+  });
+  assert.equal(withBook.summary({ nowMs: FRI("12:01") }).session.cost, 2, "1M tokens at CNY 2/M");
+
+  const without = createCostLedger({ getSessions: () => [root], windowMs: 15 * 60 * 1000, getCurrency: () => "CNY" });
+  const unpriced = without.summary({ nowMs: FRI("12:01") });
+  assert.equal(unpriced.session.cost, 0);
+  assert.equal(unpriced.session.unpricedTurns, 1, "and says so rather than reporting a confident zero");
+});
+
 test("the burn series samples the windowed rate at each settled step", () => {
   const start = FRI("12:00");
   const root = makeSession({

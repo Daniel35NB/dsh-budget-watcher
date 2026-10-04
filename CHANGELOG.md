@@ -9,7 +9,65 @@ section of the README's [Known limitations](README.md#known-limitations) it move
 
 ## [Unreleased]
 
-Documentation only — no code changed, so this carries no version of its own.
+Nothing yet.
+
+## [0.7.0] — 2026-10-03
+
+Pricing for models that are not DeepSeek's.
+
+### Added
+
+- **Models that are not DeepSeek's can now be priced.** `lib/pricing.js` reads OpenRouter's public model
+  list — free, no key, and its `prompt` / `completion` / `input_cache_read` / `input_cache_write` buckets map
+  exactly onto the cache miss / cache hit / output the plugin already prices. OpenRouter covers every provider
+  worth naming here: GLM (20 models), Kimi (9), Qwen (54), MiMo (5), plus OpenAI, Anthropic and Google.
+- **`lib/fx.js`, and a `usdToCny` setting that defaults to `"auto"`.** DeepSeek publishes its prices in both
+  CNY and USD; nobody else publishes CNY at all, so a CNY account needs a rate to see a third-party cost in its
+  own total. `auto` fetches the European Central Bank's daily reference file — 1.5 KB, no key, no auth — and a
+  number in that field means use it and make no network request, which is the older behaviour and still the
+  right answer behind a proxy or when you want the rate you were actually billed at.
+- Pricing provenance in the payload: the rate in force and where it came from, and the age of the third-party
+  model list. A cost figure is only as trustworthy as its rate card, and "the rate is unknown" is a state worth
+  showing rather than hiding.
+- **Both fetches also run on a fifteen-minute timer**, with the interval cleared when the plugin unloads and
+  `unref`'d so it cannot hold DSH open. A timer rather than only the request path, because a collapsed panel
+  stops polling — a request-driven refresh would let the rate go stale for as long as the pill stayed collapsed —
+  and because the first poll after a TTL expires would otherwise answer from the old rate. The tick is shorter
+  than either TTL, so it is a no-op almost always; the caches decide, not the timer.
+
+### Changed
+
+- **`pricedMessages` now carries `provider`**, so a turn that spanned two providers is distinguishable from a
+  model with no published price.
+- **The ledger refolds when the prices change.** Folds are cached per session, so a fold done against
+  yesterday's rate would otherwise keep being served because the log itself had not moved. The cache key now
+  includes a pricing key derived from the rate and the model list.
+
+### Fixed
+
+- **`usdToCny: 7.2` in the profile stopped the plugin activating entirely.** The schema said `Schema.string()`, a
+  YAML number is not a string, and cordis therefore refused the fiber — so the route was never registered and the
+  panel reported that it could not reach dsh. The blast radius is what makes this worth recording: a config
+  validation failure does not degrade one feature, it removes the plugin, and the symptom points at the network
+  rather than at the config. The field is now `Schema.any()` and `parseFxSetting` is the real gate — `auto` or a
+  positive number, anything else falls back to `auto` — because a loose type is the right trade when the failure
+  mode is "the plugin disappears". Three tests, one of which asserts the declaration in the source: the schema
+  cannot be exercised from the test suite, since schemastery is a peer dependency the plugin does not install.
+- **A failed price fetch no longer retries on every poll.** The panel polls every few seconds and a failure
+  caches nothing, so a dead endpoint would have been hammered indefinitely; attempts now back off. Joining an
+  in-flight attempt is checked *before* the backoff, or concurrent callers would mistake the attempt they were
+  waiting on for a recent failure and give up instead of joining it.
+- **Float noise in the per-token to per-million conversion.** `0.0000002 * 1e6` is `0.19999999999999998`, which
+  would have surfaced in the panel as `≈¥14.000000000001`.
+
+### Notes on what this deliberately does not do
+
+- **DeepSeek is never priced from the fetched list.** OpenRouter lists `deepseek/deepseek-v4.1-flash` at
+  $0.003/M input where DeepSeek's own published off-peak rate is $0.15/M — 50× apart. The provider whose invoice
+  the user pays wins, and a test asserts the book is not even consulted for a model DeepSeek publishes.
+- **Chinese providers are not scraped.** GLM's pricing page is a JavaScript shell with 127 characters of visible
+  text, and Kimi's numbers are not in its static HTML either. The fetched list covers those models in USD, and
+  the rate converts them — a native-CNY snapshot would be a hand-copied table that goes stale silently.
 
 ### Documentation
 
@@ -17,6 +75,18 @@ Documentation only — no code changed, so this carries no version of its own.
   under the old `docs/screenshot.png` URL, so the repo page still showed a superseded panel after the file was
   replaced. A new filename is the only reliable cache-bust for a committed image; `docs/screenshot.png` is deleted
   and both READMEs point at the new name. The Files table says why the name is odd, so nobody "tidies" it back.
+- **`README.zh-CN.md` rewritten in a human voice.** The first pass read as translated rather than written —
+  compressed four-character compounds and literal English calques ("天生抖动", "取短窗口"). It now reads as
+  Chinese prose: 烧 is still the term for burn, introduced once as 成本燃烧率, but the explanations run as
+  sentences instead of stacked noun phrases. Same content and all 55 limitations; only the register changed.
+
+### Documentation
+
+- **The main screenshot is renamed `docs/screenshotnew.png`.** GitHub kept serving the previous image from its
+  cache under the old `docs/screenshot.png` URL, so the repo page still showed a superseded panel after the file
+  was replaced. A new filename is the only reliable cache-bust for a committed image; `docs/screenshot.png` is
+  deleted and both READMEs point at the new name. The Files table says why the name is odd, so nobody "tidies"
+  it back.
 - **`README.zh-CN.md` rewritten in a human voice.** The first pass read as translated rather than written —
   compressed four-character compounds and literal English calques ("天生抖动", "取短窗口"). It now reads as
   Chinese prose: 烧 is still the term for burn, introduced once as 成本燃烧率, but the explanations run as
@@ -563,7 +633,8 @@ API-key balance is not the signed-in Platform account balance; the route is loop
 `allowNonLoopback` is set; polling rather than push, with a 15 s floor; and a new install requires a profile
 restart.
 
-[Unreleased]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.0...v0.6.1

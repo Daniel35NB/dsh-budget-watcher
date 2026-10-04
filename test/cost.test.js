@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { COST_CURRENCIES, PRICING, foldTurns, isPeak, normalizeCostCurrency, pricingFor, summarizeCost, usageCost } from "../lib/cost.js";
+import { COST_CURRENCIES, PRICING, foldTurns, isPeak, normalizeCostCurrency, pricedMessages, pricingFor, summarizeCost, usageCost } from "../lib/cost.js";
 
 /** 2026-10-02 is a Friday, so weekday rules apply. */
 const FRI = (hhmm) => Date.parse(`2026-10-02T${hhmm}:00Z`);
@@ -191,6 +191,64 @@ test("an empty or unreadable log summarises to zeroes instead of throwing", () =
   assert.equal(summary.session.turns, 0);
   assert.equal(summary.recent.costPerHour, 0);
   assert.equal(summary.pricingReadOn, "2026-10-03");
+});
+
+/** One turn with one assistant message on `model` from `provider`. */
+function billedTurn({ provider, model, inputTokens = 1_000_000, outputTokens = 0 }) {
+  return [
+    { type: "turn/start", seq: 0, time: FRI("12:00"), data: { turn: 1 } },
+    {
+      type: "assistant/message",
+      seq: 1,
+      time: FRI("12:00") + 1000,
+      data: { turn: 1, message: { source: { provider, model } }, usage: { inputTokens, outputTokens } },
+    },
+  ];
+}
+
+test("a model DeepSeek does not publish is priced from the fetched book", () => {
+  const events = billedTurn({ provider: "anthropic", model: "claude-sonnet-5.5" });
+  const lookup = (model, options) => {
+    assert.equal(model, "claude-sonnet-5.5");
+    assert.equal(options.currency, "USD", "the book is asked in the currency on screen");
+    return { cacheHit: 0.2, cacheMiss: 2, output: 10, source: "openrouter" };
+  };
+
+  const summary = summarizeCost({ events, nowMs: FRI("12:01"), currency: "USD", lookup });
+  // 1M uncached tokens at $2 per million.
+  assert.equal(summary.session.cost.toFixed(2), "2.00");
+  assert.equal(summary.session.unpricedTurns, 0, "it is priced, not reported as unknown");
+});
+
+test("without a book the same turn is honestly unpriced, not silently free", () => {
+  const events = billedTurn({ provider: "anthropic", model: "claude-sonnet-5.5" });
+  const summary = summarizeCost({ events, nowMs: FRI("12:01"), currency: "USD" });
+  assert.equal(summary.session.cost, 0);
+  assert.equal(summary.session.unpricedTurns, 1, "an unknown cost is reported, never assumed to be zero");
+});
+
+test("DeepSeek's own table wins over the book, which lists it far cheaper", () => {
+  // Not hypothetical: OpenRouter lists deepseek-v4.1-flash at $0.003/M input where
+  // DeepSeek's own published off-peak rate is $0.15/M. The provider whose invoice
+  // the user actually pays has to win.
+  const events = billedTurn({ provider: "deepseek", model: "deepseek-flash" });
+  let consulted = false;
+  const lookup = () => {
+    consulted = true;
+    return { cacheHit: 0.003, cacheMiss: 0.003, output: 2.4, source: "openrouter" };
+  };
+
+  const summary = summarizeCost({ events, nowMs: FRI("12:01"), currency: "USD", lookup });
+  assert.equal(summary.session.cost.toFixed(4), "0.1500", "the bundled DeepSeek rate, not the fetched one");
+  assert.equal(consulted, false, "the book is not even asked about a model DeepSeek publishes");
+});
+
+test("each priced message records which provider answered", () => {
+  const events = billedTurn({ provider: "anthropic", model: "claude-sonnet-5.5" });
+  const messages = pricedMessages(events, "", "USD", () => ({ cacheHit: 0.2, cacheMiss: 2, output: 10, source: "openrouter" }));
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].provider, "anthropic", "so a turn spanning two providers is distinguishable from an unpriced one");
+  assert.equal(messages[0].priced, true);
 });
 
 test("a currency normalises to one DeepSeek prices in", () => {
