@@ -38,9 +38,9 @@ Every figure below is read off the screenshot above, so the examples are real ra
 | Element | Meaning |
 | --- | --- |
 | `¥51.33 CNY` | `total_balance` — the whole balance: topped-up money **plus** granted credit. The headline, and the only balance row. |
-| Green dot | `is_available: true` — the account can make API calls. |
-| Amber dot | The balance is stale, the last check failed, `is_available` is `false`, or the live burn is over the warning threshold. |
-| **Red dot** | The spend limit was crossed and the plugin **interrupted the turn**. Reserved for that one event. |
+| Green dot🟢 | `is_available: true` — the account can make API calls. |
+| Amber dot🟡 | The balance is stale, the last check failed, `is_available` is `false`, or the live burn is over the warning threshold. |
+| **Red dot**🔴 | The spend limit was crossed and the plugin **interrupted the turn**. Reserved for that one event. |
 | Red dot (other) | Nothing could be read and no previous value is on screen. |
 | `just now` | When the host last got an answer. A stale number is labelled, never passed off as current. |
 | `this turn ≈¥0.12 / ¥13.93 · 22 turns` | The turn you are waiting on, and after the slash the whole conversation — including the agents either of them spawned. One row, because "what this cost" and "what it all costs" is one thought. |
