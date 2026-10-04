@@ -52,6 +52,7 @@ function makeHarness(options = {}) {
       if (serviceName === "sessions") return options.sessions;
       if (serviceName === "agents") return options.agents;
       if (serviceName === "configEditor") return options.configEditor;
+      if (serviceName === "sessionProjections") return options.sessionProjections;
       return undefined;
     },
     inject: (_dependencies, callback) => {
@@ -301,7 +302,7 @@ test("an explicit config key wins over the credentials service", async () => {
 // --- cost estimates -------------------------------------------------------
 
 /** One session whose log holds a single priced assistant message. */
-function costSession({ id, parent, inputTokens, time }) {
+function costSession({ id, parent, inputTokens, time, endAt }) {
   const events = [
     { type: "turn/start", seq: 0, time, data: { turn: 1 } },
     {
@@ -311,6 +312,9 @@ function costSession({ id, parent, inputTokens, time }) {
       data: { turn: 1, message: { source: { provider: "deepseek", model: "deepseek-flash" } }, usage: { inputTokens } },
     },
   ];
+  // Closing the turn fixes its duration, which is what makes the burn rate
+  // deterministic instead of drifting with the wall clock.
+  if (endAt !== undefined) events.push({ type: "turn/end", seq: 2, time: endAt, data: { turn: 1, reason: { kind: "completed" } } });
   return {
     id,
     header: parent === undefined ? {} : { parentSession: parent },
@@ -323,39 +327,153 @@ function costSession({ id, parent, inputTokens, time }) {
 /** Off-peak Flash input, so 1M uncached tokens is exactly $0.15. */
 const OFF_PEAK = Date.parse("2026-10-02T12:00:00Z");
 
-test("the route attaches a priced cost block when the agents service is present", async () => {
-  const root = costSession({ id: "session-root", inputTokens: 1_000_000, time: OFF_PEAK });
+test("the route attaches a priced cost block when the sessions service is present", async () => {
+  const root = costSession({ id: "session-root", inputTokens: 1_000_000, time: OFF_PEAK, endAt: OFF_PEAK + 2000 });
   const harness = makeHarness({ sessions: { list: () => [root] } });
   harness.state.credential = { value: "sk-test", source: "file" };
   stubFetch(() => json(DOCUMENTED));
-  apply(harness.ctx, { usdToCny: 7.2 });
+  // Warning disabled so this test is about the figures, not the threshold.
+  apply(harness.ctx, { burnWarnPerHour: 0 });
 
   const { body } = await request(harness.routes.get(STATE_PATH), { url: `${STATE_PATH}?session=session-root` });
   assert.equal(body.cost.available, true);
   assert.equal(body.cost.sessionId, "session-root");
-  assert.equal(body.cost.session.usd.toFixed(4), "0.1500");
-  assert.equal(body.cost.session.amount.toFixed(2), "1.08", "USD spend is shown in the balance's currency");
-  assert.equal(body.cost.currency, "CNY", "auto follows the featured wallet");
-  assert.equal(body.cost.lastTurn.usd.toFixed(4), "0.1500");
-  assert.equal(body.cost.warn, false);
+  // The fixture's only wallet is CNY, so the turn is priced from DeepSeek's
+  // published CNY card: 1M uncached Flash input off-peak is exactly CNY 1.
+  assert.equal(body.cost.currency, "CNY", "the cost follows the featured wallet");
+  assert.equal(body.cost.session.cost.toFixed(4), "1.0000");
+  assert.equal(body.cost.session.amount.toFixed(2), "1.00", "no exchange rate was applied to reach this");
+  assert.equal(body.cost.thisTurn.cost.toFixed(4), "1.0000");
+  assert.equal(body.cost.thisTurn.ended, true);
+  assert.equal(body.cost.thisTurn.durationMs, 2000, "the turn is frozen at its own measured duration");
+  // CNY 1 over 2s -> CNY 1800/hour.
+  assert.equal(body.cost.thisTurn.burnPerHour.toFixed(2), "1800.00");
+  assert.equal(body.cost.turns.length, 1, "the closed turn is kept for comparison");
+  assert.equal(body.cost.turns[0].burnPerHour.toFixed(2), "1800.00");
+  assert.equal(body.cost.burnWindowMs, 15_000, "the live window defaults to 15s");
+  assert.equal(body.cost.graphEnabled, true, "the chart is on by default");
+  // One step, 1 ms into the turn and inside the 15 s window: CNY 1.00 over that
+  // window is CNY 240/hour.
+  assert.equal(body.cost.thisTurn.series.length, 1);
+  assert.equal(body.cost.thisTurn.series[0].atMs, 1);
+  assert.equal(body.cost.thisTurn.series[0].amountPerHour.toFixed(2), "240.00");
+  assert.equal(typeof body.cost.serverNow, "number", "the panel ticks elapsed time locally against this");
+  assert.equal(body.cost.warn, false, "the warning was disabled");
 });
 
-test("a fan-out raises the burn warning the last turn alone would hide", async () => {
-  const root = costSession({ id: "session-root", inputTokens: 10_000, time: OFF_PEAK });
+test("a fan-out raises the burn warning the turn figure alone would hide", async () => {
+  // Times are relative to now, because the live rate is a *window* rate: a
+  // fixture dated hours ago is honestly outside a 15 s window and would read 0.
+  const now = Date.now();
+  const root = costSession({ id: "session-root", inputTokens: 10_000, time: now - 5_000, endAt: now - 2_000 });
   const children = Array.from({ length: 40 }, (_, index) =>
-    costSession({ id: `session-child-${index}`, parent: "session-root", inputTokens: 1_000_000, time: OFF_PEAK + 1000 }),
+    costSession({ id: `session-child-${index}`, parent: "session-root", inputTokens: 1_000_000, time: now - 3_000 }),
   );
   const harness = makeHarness({ sessions: { list: () => [root, ...children] } });
   harness.state.credential = { value: "sk-test", source: "file" };
   stubFetch(() => json(DOCUMENTED));
-  apply(harness.ctx, { burnWarnUsdPerHour: 2, burnWindowMs: 15 * 60 * 1000 });
+  apply(harness.ctx, { burnWarnPerHour: 2 });
 
   const { body } = await request(harness.routes.get(STATE_PATH), { url: `${STATE_PATH}?session=session-root` });
   assert.equal(body.cost.session.descendants, 40);
-  assert.equal(body.cost.session.usd.toFixed(3), (40 * 0.15 + 0.0015).toFixed(3));
-  assert.equal(body.cost.lastTurn.usd.toFixed(4), "0.0015", "the visible turn looks cheap");
-  assert.equal(body.cost.warn, true, "the projected hourly rate is what warns");
-  assert.equal(body.cost.usdToCny, 7.2);
+  // 40 x CNY 1.00 + CNY 0.01.
+  assert.equal(body.cost.session.cost.toFixed(2), (40 * 1 + 0.01).toFixed(2));
+  // The turn's own figure is attributed by time window, so the agents it
+  // spawned land inside it rather than being invisible until the rollup.
+  assert.equal(body.cost.thisTurn.cost.toFixed(2), (40 * 1 + 0.01).toFixed(2));
+  assert.equal(body.cost.burnWindowMs, 15_000);
+  assert.equal(body.cost.liveBurnPerHour > 2, true, `the live rate is what warns, got ${body.cost.liveBurnPerHour}`);
+  assert.equal(body.cost.warn, true, "the live rate is what warns");
+  assert.equal(body.cost.terminateAbovePerHour, 0, "termination is off unless asked for");
+  assert.equal(body.cost.overTerminate, false);
+});
+
+test("terminate above interrupts the running turn, once and only once", async () => {
+  const now = Date.now();
+  const root = costSession({ id: "session-root", inputTokens: 1_000_000, time: now - 5_000 });
+  const cancelled = [];
+  const agent = {
+    id: "session-root",
+    session: root,
+    status: "running",
+    cancel: (cause, options) => cancelled.push({ cause, options }),
+  };
+  const harness = makeHarness({
+    sessions: { list: () => [root] },
+    agents: { list: () => [agent], get: (id) => (id === "session-root" ? agent : undefined) },
+    sessionProjections: { stateOf: () => ({ openTurnStartSeq: 4, lastTurn: 7 }) },
+  });
+  harness.state.credential = { value: "sk-test", source: "file" };
+  stubFetch(() => json(DOCUMENTED));
+  apply(harness.ctx, { terminateAbovePerHour: 1 });
+
+  const { body } = await request(harness.routes.get(STATE_PATH), { url: `${STATE_PATH}?session=session-root` });
+  assert.equal(body.cost.overTerminate, true, "the live rate is over the limit");
+  assert.equal(cancelled.length, 1, "the running turn was interrupted");
+  // The same primitive the stop button uses, tagged with provenance rather than
+  // pretending a user pressed it.
+  assert.deepEqual(cancelled[0].cause, { kind: "hook", reason: "dsh-budget-watcher/over-budget" });
+  assert.equal(cancelled[0].options.keepInbox, true, "queued input is not silently discarded");
+  assert.equal(body.terminated.turn, 1, "the latch records the turn it stopped");
+  assert.equal(body.terminated.outcome, "cancelled");
+
+  // A second poll must not stop it again: the fire is latched per turn.
+  await request(harness.routes.get(STATE_PATH), { url: `${STATE_PATH}?session=session-root` });
+  assert.equal(cancelled.length, 1, "one runaway turn is stopped once, not once per poll");
+});
+
+test("terminate above is inert at 0, which is the default", async () => {
+  const now = Date.now();
+  const root = costSession({ id: "session-root", inputTokens: 1_000_000, time: now - 5_000 });
+  const cancelled = [];
+  const agent = { id: "session-root", session: root, status: "running", cancel: () => cancelled.push(1) };
+  const harness = makeHarness({
+    sessions: { list: () => [root] },
+    agents: { list: () => [agent], get: () => agent },
+    sessionProjections: { stateOf: () => ({ openTurnStartSeq: 1, lastTurn: 1 }) },
+  });
+  harness.state.credential = { value: "sk-test", source: "file" };
+  stubFetch(() => json(DOCUMENTED));
+  apply(harness.ctx, {});
+
+  const { body } = await request(harness.routes.get(STATE_PATH), { url: `${STATE_PATH}?session=session-root` });
+  assert.equal(body.cost.terminateAbovePerHour, 0);
+  assert.equal(body.cost.overTerminate, false, "an expensive turn is not stopped unless asked for");
+  assert.equal(cancelled.length, 0, "nothing was interrupted");
+  assert.equal(body.terminated, null);
+});
+
+test("a turn is not stopped when the session has no open turn", async () => {
+  const now = Date.now();
+  const root = costSession({ id: "session-root", inputTokens: 1_000_000, time: now - 5_000 });
+  const cancelled = [];
+  const agent = { id: "session-root", session: root, status: "running", cancel: () => cancelled.push(1) };
+  const harness = makeHarness({
+    sessions: { list: () => [root] },
+    agents: { list: () => [agent], get: () => agent },
+    // `openTurnStartSeq: null` is the projection's way of saying no turn is open,
+    // even though the agent still reports itself as running.
+    sessionProjections: { stateOf: () => ({ openTurnStartSeq: null, lastTurn: 7 }) },
+  });
+  harness.state.credential = { value: "sk-test", source: "file" };
+  stubFetch(() => json(DOCUMENTED));
+  apply(harness.ctx, { terminateAbovePerHour: 1 });
+
+  const { body } = await request(harness.routes.get(STATE_PATH), { url: `${STATE_PATH}?session=session-root` });
+  assert.equal(body.terminated.outcome, "no-open-turn");
+  assert.equal(cancelled.length, 0, "nothing to stop, so nothing is cancelled");
+});
+
+test("the chart can be turned off without turning the figures off", async () => {
+  const root = costSession({ id: "session-root", inputTokens: 1_000_000, time: OFF_PEAK, endAt: OFF_PEAK + 2000 });
+  const harness = makeHarness({ sessions: { list: () => [root] } });
+  harness.state.credential = { value: "sk-test", source: "file" };
+  stubFetch(() => json(DOCUMENTED));
+  apply(harness.ctx, { graphEnabled: false });
+
+  const { body } = await request(harness.routes.get(STATE_PATH), { url: `${STATE_PATH}?session=session-root` });
+  assert.equal(body.cost.graphEnabled, false);
+  assert.equal(body.cost.thisTurn.cost.toFixed(4), "1.0000", "the figures are unaffected");
 });
 
 test("costEnabled false still answers the balance, and says why there are no figures", async () => {
@@ -401,19 +519,36 @@ test("the agents service is used when there is no session registry", async () =>
   apply(harness.ctx, {});
 
   const { body } = await request(harness.routes.get(STATE_PATH));
-  assert.equal(body.cost.session.usd.toFixed(4), "0.1500");
+  assert.equal(body.cost.session.cost.toFixed(4), "1.0000");
 });
 
-test("an explicit costCurrency overrides the balance currency", async () => {
+test("an explicit currency setting prices and labels the costs in that currency", async () => {
   const root = costSession({ id: "session-root", inputTokens: 1_000_000, time: OFF_PEAK });
   const harness = makeHarness({ sessions: { list: () => [root] } });
   harness.state.credential = { value: "sk-test", source: "file" };
   stubFetch(() => json(DOCUMENTED));
-  apply(harness.ctx, { costCurrency: "USD", usdToCny: 7.2 });
+  // The documented account holds only CNY. Asking for USD must still mean USD:
+  // choosing a currency is a display decision, not a claim about which wallets
+  // exist, and silently falling back made the setting look broken.
+  apply(harness.ctx, { currency: "USD" });
 
   const { body } = await request(harness.routes.get(STATE_PATH));
-  assert.equal(body.cost.currency, "USD");
-  assert.equal(body.cost.session.amount.toFixed(4), "0.1500", "no conversion is applied for USD");
+  assert.equal(body.cost.currency, "USD", "the setting wins");
+  // 1M uncached Flash input off-peak in the USD book is exactly $0.15.
+  assert.equal(body.cost.session.cost.toFixed(4), "0.1500", "priced from the USD card");
+  assert.equal(body.cost.session.amount.toFixed(4), "0.1500");
+});
+
+test("auto follows the featured wallet's currency", async () => {
+  const root = costSession({ id: "session-root", inputTokens: 1_000_000, time: OFF_PEAK });
+  const harness = makeHarness({ sessions: { list: () => [root] } });
+  harness.state.credential = { value: "sk-test", source: "file" };
+  stubFetch(() => json(DOCUMENTED));
+  apply(harness.ctx, { currency: "auto" });
+
+  const { body } = await request(harness.routes.get(STATE_PATH));
+  assert.equal(body.cost.currency, "CNY");
+  assert.equal(body.cost.session.cost.toFixed(4), "1.0000", "priced from the CNY card");
 });
 
 // --- settings tab ---------------------------------------------------------
@@ -491,12 +626,12 @@ test("saving validates, merges onto the current config, and reports the new valu
   apply(harness.ctx, {});
 
   const { status, body } = await postConfig(harness.routes.get(CONFIG_PATH), {
-    patch: { currency: "USD", costEnabled: false, burnWindowMs: 600_000, usdToCny: 7.1 },
+    patch: { currency: "USD", costEnabled: false, burnWindowMs: 30_000, burnWarnPerHour: 7.1, terminateAbovePerHour: 50 },
   });
   assert.equal(status, 200);
   assert.equal(body.ok, true);
   assert.equal(seen.entry.options.id, "budget-watcher", "the editor writes to this plugin's own row");
-  assert.deepEqual(seen.next, { currency: "USD", costEnabled: false, burnWindowMs: 600_000, usdToCny: 7.1 },
+  assert.deepEqual(seen.next, { currency: "USD", costEnabled: false, burnWindowMs: 30_000, burnWarnPerHour: 7.1, terminateAbovePerHour: 50 },
     "only the fields that were sent, merged onto what was there");
 });
 

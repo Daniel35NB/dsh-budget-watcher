@@ -264,6 +264,40 @@ test("apply mounts into shell.overlay with a plugin-owned id and a tagged styles
   assert.match(styles[0].textContent, /--dsw-alias-bg-layer-2/, "the panel uses the theme tokens, not literal colors");
 });
 
+test("the settings form scrolls, and Save is pinned so it stays reachable", async () => {
+  const { styles } = await mount({ withSidebar: true });
+  const css = styles[0].textContent;
+
+  // The pane gives the tab a bounded height and does not scroll it, so the form
+  // has to own its scrolling. Without this the content below the fold — Save
+  // among it — is simply unreachable.
+  const formRule = css.slice(css.indexOf(".dshbw-form{"), css.indexOf(".dshbw-form{") + 400);
+  assert.match(formRule, /overflow-y:auto/, "the form is a scroll container");
+  assert.match(formRule, /min-height:0/, "a flex child must be allowed to shrink, or it overflows instead of scrolling");
+  assert.match(css, /\.dshbw-actions-row\{[^}]*position:sticky/, "Save sticks to the bottom of the scroll container");
+  assert.match(css, /\.dshbw-actions-row\{[^}]*background:/, "and carries its own background, or rows scroll through it");
+  // The turn list grows with the conversation, so it is capped separately.
+  assert.match(css, /\.dshbw-turns\{[^}]*max-height:\d+px/, "the turn list is bounded");
+  assert.match(css, /\.dshbw-turns\{[^}]*overflow-y:auto/, "and scrolls itself");
+});
+
+test("the recent-turns list is wrapped in its own scrolling container", async () => {
+  const harness = await mount({
+    withSidebar: true,
+    respond: (url) =>
+      url.includes("/config")
+        ? Response.json({ ok: true, settings: SETTINGS })
+        : Response.json({ ...HOST_STATE, settings: SETTINGS, cost: COST }),
+  });
+  const body = tabBody(harness);
+  render(body, harness.store);
+  await settle();
+  const tree = render(body, harness.store).tree;
+  assert.equal(findByClass(tree, "dshbw-turns") !== undefined, true, "the rows sit in the bounded container");
+  // Save is still rendered alongside it, not crowded out.
+  assert.ok(findButtons(tree).some((button) => textOf(button) === "Save"), "Save survives a populated turn list");
+});
+
 test("the panel draws the whole balance as its headline, with no second line", async () => {
   const { component, store } = await mount();
   render(component, store);
@@ -314,30 +348,239 @@ test("an unreachable host is reported without losing the widget", async () => {
 
 // --- cost estimates -------------------------------------------------------
 
+/**
+ * A turn 30 seconds in, having spent $0.0305. `serverNow` is fixed so the
+ * elapsed calculation is deterministic: the host's clock offset cancels the
+ * page's real clock, leaving exactly 30 000 ms.
+ */
+const TURN_START = Date.parse("2026-10-02T12:00:00Z");
 const COST = {
   available: true,
   sessionId: "session-root",
   currency: "CNY",
-  usdToCny: 7.2,
-  pricingReadOn: "2026-10-02",
+  pricingReadOn: "2026-10-03",
+  burnWindowMs: 15_000,
+  liveBurnPerHour: 8.4,
+  liveAmountPerHour: 60.48,
+  averageBurnPerHour: 3.66,
+  averageAmountPerHour: 26.352,
   warn: false,
-  warnUsdPerHour: 2,
-  lastTurn: { turn: 3, ended: false, usd: 0.0305, amount: 0.2196, uncachedInputTokens: 1000, cacheReadTokens: 0, outputTokens: 0, messages: 2, models: ["deepseek-flash"] },
-  session: { usd: 2.1, amount: 15.12, turns: 4, sessions: 41, descendants: 40, unpricedTurns: 0 },
-  recent: { windowMs: 900000, usd: 2.1, amount: 15.12, usdPerHour: 8.4, amountPerHour: 60.48, messages: 12 },
+  warnPerHour: 2,
+  terminateAbovePerHour: 0,
+  overTerminate: false,
+  graphEnabled: true,
+  serverNow: TURN_START + 30_000,
+  thisTurn: {
+    turn: 3,
+    ended: false,
+    startedAt: TURN_START,
+    endedAt: null,
+    durationMs: 30_000,
+    cost: 0.0305,
+    amount: 0.2196,
+    burnPerHour: 3.66,
+    amountPerHour: 26.352,
+    uncachedInputTokens: 1000,
+    cacheReadTokens: 0,
+    outputTokens: 0,
+    messages: 2,
+    attempts: 0,
+    models: ["deepseek-flash"],
+    series: [
+      { atMs: 5_000, amountPerHour: 12 },
+      { atMs: 15_000, amountPerHour: 48 },
+    ],
+  },
+  turns: [
+    { turn: 1, endedAt: TURN_START - 60_000, durationMs: 120_000, cost: 0.05, amount: 0.36, burnPerHour: 1.5, amountPerHour: 10.8, messages: 3 },
+    { turn: 2, endedAt: TURN_START - 10_000, durationMs: 60_000, cost: 0.5, amount: 3.6, burnPerHour: 30, amountPerHour: 216, messages: 9 },
+  ],
+  session: { cost: 2.1, amount: 15.12, turns: 4, sessions: 41, descendants: 40, unpricedTurns: 0 },
+  recent: { windowMs: 15_000, cost: 2.1, amount: 15.12, costPerHour: 8.4, amountPerHour: 60.48, messages: 12 },
 };
 
-test("the panel shows the last turn, the session total and the burn rate", async () => {
+test("the panel shows this turn, a live burn and the turn's average burn", async () => {
   const { component, store } = await mount({ state: { ...HOST_STATE, cost: COST } });
   render(component, store);
   await settle();
   const text = textOf(render(component, store).tree);
-  assert.match(text, /last turn/);
-  assert.match(text, /\u2248\u00a50\.22/, "the last turn is shown as an approximate figure");
-  assert.match(text, /session \u2248\u00a515\.12/, "USD spend is converted for a CNY balance");
-  assert.match(text, /4 turns/);
-  assert.match(text, /40 agents/, "the fan-out is visible, not hidden behind one turn");
-  assert.match(text, /burn \u2248\u00a560\.48\/h/);
+  assert.match(text, /this turn/, "renamed: the figure is the turn the user is waiting on");
+  assert.doesNotMatch(text, /last turn/);
+  // The turn's own cost and the conversation total share one row: what this cost
+  // against what it all costs is one thought, not two.
+  assert.match(text, /\u2248\u00a50\.22 \/ \u00a515\.12 \u00b7 4 turns \u00b7 40 agents/, "turn and session share a row");
+  assert.doesNotMatch(text, /session /, "the separate session row is gone");
+  assert.match(text, /40 agents/, "the fan-out is still visible");
+
+  // The two rates are separate figures at different resolutions: the window rate
+  // is the sudden-loss detector, the turn average is what a task is worth.
+  assert.match(text, /live burn \u2248\u00a560\.48\/h/, "the live rate is the windowed one");
+  assert.match(text, /average burn \u2248\u00a526\.35\/h/, "the average is the turn's own cost over its time");
+  assert.match(text, /0:30/, "the elapsed clock is shown beside the average");
+  assert.match(text, /15s/, "the live window is named, because a short window is the point");
+});
+
+test("a running turn is marked live; a finished one is not", async () => {  const running = await mount({ state: { ...HOST_STATE, cost: COST } });
+  render(running.component, running.store);
+  await settle();
+  assert.equal(textOf(render(running.component, running.store).tree).includes("\u25cf"), true, "the live dot shows while the turn runs");
+
+  const frozen = {
+    ...COST,
+    liveBurnPerHour: 0,
+    liveAmountPerHour: 0,
+    averageBurnPerHour: 17.568,
+    averageAmountPerHour: 17.568,
+    thisTurn: { ...COST.thisTurn, ended: true, endedAt: TURN_START + 45_000, durationMs: 45_000, amountPerHour: 17.568 },
+  };
+  const done = await mount({ state: { ...HOST_STATE, cost: frozen } });
+  render(done.component, done.store);
+  await settle();
+  const text = textOf(render(done.component, done.store).tree);
+  assert.equal(text.includes("\u25cf"), false, "no heartbeat once the turn closes");
+  // A finished turn keeps its average over the exact span it occupied.
+  assert.match(text, /average burn \u2248\u00a517\.57\/h/);
+  assert.match(text, /0:45/);
+  // Nothing settled inside the window, so the live rate is honestly zero.
+  assert.match(text, /live burn \u2248\u00a50\.00\/h/);
+});
+
+test("the chart draws the turn's burn against its own elapsed time", async () => {
+  const { component, store } = await mount({ state: { ...HOST_STATE, cost: COST } });
+  render(component, store);
+  await settle();
+  const tree = render(component, store).tree;
+
+  const chart = findByClass(tree, "dshbw-chart");
+  assert.ok(chart, "the chart is drawn");
+  assert.equal(chart.type, "svg");
+  // The viewBox ratio matches the stylesheet's, so the drawing and its box agree
+  // and nothing is letterboxed.
+  assert.equal(chart.props.viewBox, "0 0 240 100");
+  assert.match(chart.props["aria-label"], /Live burn for this turn in CNY per hour/);
+  // The peak is labelled, not just drawn. It is the live head (¥60.48) rather
+  // than the last host sample (¥48), because the line always ends at now.
+  assert.match(chart.props["aria-label"], /Peak \u00a560/);
+
+  // The line itself, and the x-axis running from 0:00 to the live elapsed time.
+  const line = findByClass(tree, "dshbw-chart-live");
+  assert.ok(line, "the burn line is drawn");
+  const text = textOf(tree);
+  assert.match(text, /0:00/);
+  assert.match(text, /0:30/, "the axis ends at the turn's elapsed time");
+});
+
+test("the chart carries a warn line, and a stop line only once one is set", async () => {
+  const armed = {
+    ...COST,
+    terminateAbovePerHour: 50,
+    thisTurn: { ...COST.thisTurn, series: [{ atMs: 5_000, amountPerHour: 12 }] },
+  };
+  const { component, store } = await mount({ state: { ...HOST_STATE, cost: armed } });
+  render(component, store);
+  await settle();
+  const tree = render(component, store).tree;
+
+  assert.ok(findByClass(tree, "dshbw-chart-warn"), "the warning threshold is drawn");
+  assert.ok(findByClass(tree, "dshbw-chart-term"), "the stop threshold is drawn when it is armed");
+  assert.match(textOf(tree), /warn \u00a52/);
+  assert.match(textOf(tree), /stop \u00a550/);
+});
+
+test("no stop line is drawn while terminating is off, which is the default", async () => {
+  const { component, store } = await mount({ state: { ...HOST_STATE, cost: COST } });
+  render(component, store);
+  await settle();
+  const tree = render(component, store).tree;
+
+  assert.ok(findByClass(tree, "dshbw-chart-warn"), "warn is always drawn while it is set");
+  assert.equal(findByClass(tree, "dshbw-chart-term"), undefined, "0 disables termination, so no red line");
+});
+
+test("the threshold labels carry a fill of their own, so they are not black on dark", async () => {
+  const armed = { ...COST, terminateAbovePerHour: 50 };
+  const { component, store } = await mount({ state: { ...HOST_STATE, cost: armed } });
+  render(component, store);
+  await settle();
+  const tree = render(component, store).tree;
+  assert.ok(findByClass(tree, "dshbw-chart-key--warn"), "the warn label has a colour of its own");
+  assert.ok(findByClass(tree, "dshbw-chart-key--term"), "and so does the stop label");
+});
+
+test("the chart spans the panel and cannot widen it", async () => {
+  const { styles } = await mount({ withSidebar: true });
+  const css = styles[0].textContent;
+  const start = css.indexOf(".dshbw-chart{");
+  const rule = css.slice(start, start + 200);
+  assert.match(rule, /width:100%/, "full content width, so it lines up with the text rows");
+  assert.match(rule, /aspect-ratio:240\/100/, "and the ratio matches the viewBox");
+  assert.doesNotMatch(rule, /margin:3px auto/, "left aligned, not floating in the middle");
+
+  // `<svg>` is a replaced element with a 300x150 intrinsic size, and a percentage
+  // width counts as `auto` during shrink-to-fit sizing — so without containment the
+  // chart's default width became the panel's and pinned it at the 300px cap.
+  assert.match(css, /\.dshbw-chart-wrap\{[^}]*contain:inline-size/, "the wrapper must not pass its contents' width up");
+  // An SVG text with no fill defaults to black, which is what made the threshold
+  // caption unreadable on the dark theme.
+  assert.match(css, /\.dshbw-chart-key--warn\{fill:/);
+  assert.match(css, /\.dshbw-chart-key--term\{fill:/);
+});
+
+test("the burn line starts at the axis origin even if the first step settles later", async () => {
+  const late = { ...COST, thisTurn: { ...COST.thisTurn, series: [{ atMs: 20_000, amountPerHour: 40 }] } };
+  const { component, store } = await mount({ state: { ...HOST_STATE, cost: late } });
+  render(component, store);
+  await settle();
+  const chart = findByClass(render(component, store).tree, "dshbw-chart");
+  const line = findByClass(chart, "dshbw-chart-live");
+
+  // Points are "x,y" pairs, and the first must sit on the axis at zero rather than
+  // 20 s along it — otherwise the left of the plot reads as missing data.
+  const first = line.props.points.split(" ")[0].split(",");
+  assert.equal(Number(first[0]), 24, "the plot's left edge, where the gridlines begin");
+  assert.equal(Number(first[1]), 89, "and on the zero line: nothing had been spent yet");
+});
+
+test("every gridline on an axis is written to the same precision", async () => {
+  const { component, store } = await mount({ state: { ...HOST_STATE, cost: COST } });
+  render(component, store);
+  await settle();
+  const chart = findByClass(render(component, store).tree, "dshbw-chart");
+  const axis = textsIn(chart).filter((label) => /^\u00a5/.test(label));
+
+  assert.equal(axis.length > 1, true, `expected several axis labels, got ${JSON.stringify(textsIn(chart))}`);
+  // Peak is ¥60.48, so the axis steps by 20 and every line is a whole yuan —
+  // not "¥10" above "¥5.00", which reads as three kinds of number.
+  assert.equal(axis.every((label) => /^\u00a5\d+$/.test(label)), true, `mixed precision: ${JSON.stringify(axis)}`);
+});
+
+test("with no turn the session total keeps a row of its own", async () => {
+  const noTurn = { ...COST, thisTurn: null };
+  const { component, store } = await mount({ state: { ...HOST_STATE, cost: noTurn } });
+  render(component, store);
+  await settle();
+  const text = textOf(render(component, store).tree);
+  assert.match(text, /session/, "nothing to pair it with, so it stands alone");
+  assert.match(text, /\u00a515\.12 \u00b7 4 turns \u00b7 40 agents/);
+  assert.doesNotMatch(text, /this turn/);
+});
+
+test("the chart is left out entirely when the setting is off", async () => {
+  const off = { ...COST, graphEnabled: false };
+  const { component, store } = await mount({ state: { ...HOST_STATE, cost: off } });
+  render(component, store);
+  await settle();
+  const tree = render(component, store).tree;
+  assert.equal(findByClass(tree, "dshbw-chart"), undefined);
+  assert.match(textOf(tree), /this turn/, "the figures are still there without the chart");
+});
+
+test("the chart is absent when there is no turn to draw", async () => {
+  const noTurn = { ...COST, thisTurn: null };
+  const { component, store } = await mount({ state: { ...HOST_STATE, cost: noTurn } });
+  render(component, store);
+  await settle();
+  assert.equal(findByClass(render(component, store).tree, "dshbw-chart"), undefined);
 });
 
 test("a burning session is called out, and the pill keeps the warning when collapsed", async () => {
@@ -541,12 +784,38 @@ const SETTINGS = {
     currency: "auto",
     allowNonLoopback: false,
     costEnabled: true,
-    burnWindowMs: 900_000,
-    burnWarnUsdPerHour: 2,
-    usdToCny: 7.2,
-    costCurrency: "auto",
+    burnWindowMs: 30_000,
+    burnWarnPerHour: 2,
+    terminateAbovePerHour: 0,
   },
 };
+
+/** Every string an SVG <text> would render, in tree order. */
+function textsIn(node, found = []) {
+  if (node === null || node === undefined || typeof node !== "object") return found;
+  if (Array.isArray(node)) {
+    for (const child of node) textsIn(child, found);
+    return found;
+  }
+  if (node.type === "text") found.push(textOf(node));
+  textsIn(node.props?.children, found);
+  return found;
+}
+
+/** Depth-first search for an element carrying a given class. */
+function findByClass(node, className) {
+  if (node === null || node === undefined || typeof node !== "object") return undefined;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = findByClass(child, className);
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
+  }
+  const own = node.props?.className;
+  if (typeof own === "string" && own.split(/\s+/).includes(className)) return node;
+  return findByClass(node.props?.children, className);
+}
 
 /** Depth-first search for an element carrying a given aria-label. */
 function findByLabel(node, label) {
@@ -631,7 +900,10 @@ test("with a right sidebar the gear opens a tab registered under a kind the host
 test("the settings tab renders the running configuration as editable fields", async () => {
   const harness = await mount({
     withSidebar: true,
-    respond: (url) => (url.includes("/config") ? Response.json({ ok: true, settings: SETTINGS }) : Response.json({ ...HOST_STATE, settings: SETTINGS })),
+    respond: (url) =>
+      url.includes("/config")
+        ? Response.json({ ok: true, settings: SETTINGS })
+        : Response.json({ ...HOST_STATE, settings: SETTINGS, cost: COST }),
   });
   const body = tabBody(harness);
   render(body, harness.store);
@@ -640,20 +912,25 @@ test("the settings tab renders the running configuration as editable fields", as
 
   assert.match(text, /API key reference/);
   assert.match(text, /Estimate what turns cost/);
-  assert.match(text, /Burn window \(minutes\)/);
-  assert.match(text, /USD \u2192 CNY rate/);
+  assert.match(text, /Live burn window \(seconds\)/);
+  // The thresholds are labelled in the currency the balance is held in, which
+  // comes from the cost payload rather than being assumed.
+  assert.match(text, /Warn above \(CNY\/hour\)/);
+  assert.match(text, /Terminate above \(CNY\/hour, 0 = off\)/);
   assert.match(text, /Refresh interval \(seconds\)/);
   assert.match(text, /Save/);
+  // The currency is a closed set, because DeepSeek only publishes rates in two.
+  assert.doesNotMatch(text, /USD \u2192 CNY rate/, "no exchange rate is needed or offered");
 
   // Durations are shown in the units a person thinks in, and the values live in
   // the inputs rather than in the text.
   const values = inputsOf(render(body, harness.store).tree);
   assert.equal(values[0], "DEEPSEEK_API_KEY", "the credential reference is prefilled");
   assert.ok(values.includes("60"), `the 60000 ms refresh reads as 60 seconds (got ${values.join(", ")})`);
-  assert.ok(values.includes("15"), "the 900000 ms burn window reads as 15 minutes");
+  assert.ok(values.includes("30"), "the 30000 ms live window reads as 30 seconds");
   assert.ok(values.includes("10"), "the 10000 ms timeout reads as 10 seconds");
-  assert.ok(values.includes("7.2"), "the exchange rate is prefilled");
   assert.ok(values.includes("2"), "the warning threshold is prefilled");
+  assert.ok(values.includes("0"), "termination is prefilled as off");
 });
 
 test("saving posts a patch to the host and reports what came back", async () => {
@@ -662,7 +939,7 @@ test("saving posts a patch to the host and reports what came back", async () => 
     respond: (url) =>
       url.includes("/config")
         ? Response.json({ ok: true, settings: SETTINGS, note: "Saved to the profile patch." })
-        : Response.json({ ...HOST_STATE, settings: SETTINGS }),
+        : Response.json({ ...HOST_STATE, settings: SETTINGS, cost: COST }),
   });
   const body = tabBody(harness);
   render(body, harness.store);
@@ -680,7 +957,9 @@ test("saving posts a patch to the host and reports what came back", async () => 
   assert.match(post.init.headers["content-type"], /application\/json/, "the fence requires a JSON body");
   const sent = JSON.parse(post.init.body);
   assert.equal(sent.patch.refreshIntervalMs, 60_000, "seconds are converted back to milliseconds");
-  assert.equal(sent.patch.burnWindowMs, 900_000, "minutes are converted back to milliseconds");
+  assert.equal(sent.patch.burnWindowMs, 30_000, "seconds are converted back for the live window");
+  assert.equal(sent.patch.burnWarnPerHour, 2);
+  assert.equal(sent.patch.terminateAbovePerHour, 0);
   assert.equal(sent.patch.costEnabled, true);
   assert.equal("apiKey" in sent.patch, false, "an untouched password field is not posted, so it cannot clear the key");
 
@@ -707,4 +986,26 @@ test("disposing the plugin withdraws the tab and the gear", async () => {
   await settle();
   const tree = render(harness.component, harness.store).tree;
   assert.equal(findByLabel(tree, "Open budget watcher settings"), undefined, "the gear goes away with the tab");
+});
+
+test("the settings tab ranks recent turns by burn, so tasks can be compared", async () => {
+  const harness = await mount({
+    withSidebar: true,
+    respond: (url) =>
+      url.includes("/config")
+        ? Response.json({ ok: true, settings: SETTINGS })
+        : Response.json({ ...HOST_STATE, settings: SETTINGS, cost: COST }),
+  });
+  const body = tabBody(harness);
+  render(body, harness.store);
+  await settle();
+  const text = textOf(render(body, harness.store).tree);
+
+  assert.match(text, /Recent turns \(hottest first\)/);
+  // Turn 2 burned ¥216/h over 1:00; turn 1 burned ¥10.80/h over 2:00.
+  const hot = text.indexOf("216.00");
+  const cool = text.indexOf("10.80");
+  assert.equal(hot >= 0 && cool >= 0 && hot < cool, true, `hottest turn should come first, got: ${text}`);
+  assert.match(text, /2:00/, "each turn carries its duration");
+  assert.match(text, /1:00/);
 });

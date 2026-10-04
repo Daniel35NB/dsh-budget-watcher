@@ -6,8 +6,9 @@ the turns you just ran actually cost**.
 
 ![The budget watcher floating over a conversation](docs/screenshot.png)
 
-*Captured against 0.2.0. The `topped up` caption and the `total … granted …` row it shows were removed in
-0.3.0 — the headline is now the total on its own, and the split lives in the settings tab.*
+*Captured against 0.2.0, so it is now several revisions stale: the `topped up` caption and the `total …
+granted …` row shown here were removed in 0.3.0, and the single `burn` row became `live burn` and
+`average burn` in 0.5.0. A fresh capture is owed.*
 
 The balance is `topped_up_balance` from DeepSeek's public balance API — the money you actually paid in, not
 the promotional credit that expires. When the two differ, the widget shows the split so a balance of `0.00`
@@ -29,19 +30,21 @@ prompt.** See [What it costs you](#what-it-costs-you).
 | --- | --- |
 | `¥21.61 CNY` | `total_balance` — the whole balance: topped-up money **plus** granted credit. The headline, and the only balance row. |
 | Green dot | `is_available: true` — the account can make API calls. |
-| Amber dot | The balance is stale, the last check failed, `is_available` is `false`, or the burn rate is over the warning threshold. |
-| Red dot | Nothing could be read and no previous value is on screen. |
+| Amber dot | The balance is stale, the last check failed, `is_available` is `false`, or the live burn is over the warning threshold. |
+| **Red dot** | The spend limit was crossed and the plugin **interrupted the turn**. Reserved for that one event. |
+| Red dot (other) | Nothing could be read and no previous value is on screen. |
 | `1 min ago` | When the host last got an answer. A stale number is labelled, never passed off as current. |
-| `last turn ≈¥0.22` | What the turn your last message started has cost so far, even while it is still running. |
-| `session ≈¥15.12 · 4 turns · 40 agents` | The whole conversation, including the subagent sessions it spawned. |
-| `burn ≈¥60.48/h` | What the last 15 minutes project to per hour. Amber when over the threshold. |
+| `this turn ≈¥0.78 / ¥13.05 · 19 turns` | The turn you are waiting on, and after the slash the whole conversation — including the agents either of them spawned. One row, because "what this cost" and "what it all costs" is one thought. |
+| `live burn ≈¥60.48/h · 15s` | What the last window cost, projected per hour. The sudden-loss figure, and the one both thresholds act on. A pulsing dot marks a turn still in flight. |
+| `average burn ≈¥26.35/h · 0:30` | That turn's cost over its elapsed time — a running average, frozen the moment the turn ends. |
+| The chart | This turn's live burn against its own elapsed time, with the warn and stop lines drawn across it. Blue is the rate, amber the warning, red the stop. |
+| `session ¥15.12 · 4 turns` | The conversation total on a row of its own — only when there is no turn yet to pair it with. |
 | `2 turn(s) unpriced` | A model with no published rate was seen, so those turns are reported rather than costed at a guess. |
 | `Not available for API calls` | `is_available: false`. |
 | `No API key is configured…` | The host found no key; the message names the credential reference to set. |
 
 The header already says *DeepSeek balance*, so the amount carries no caption and there is no second balance
-line. The granted/topped-up split — and every setting — lives behind the gear button, which keeps the panel
-itself to three rows.
+line. The granted/topped-up split — and every setting — lives behind the gear button.
 
 ## What it costs you
 
@@ -49,18 +52,74 @@ A research turn that fans out to sixty subagents is invisible from the conversat
 answer has arrived, and the balance is falling. Balance alone tells you *that* you are spending; it does not
 tell you *how fast*, which is the number you need to decide whether to stop.
 
-The panel answers that with three figures, all derived from data already on disk:
+The panel answers that with four figures, all derived from data already on disk:
 
-- **`last turn`** — the turn your most recent message started. It updates as the turn runs, because usage is
-  reported per assistant message rather than per turn.
+- **`this turn`** — what the turn you are waiting on has cost so far. It updates as each step settles, because
+  usage is reported per assistant message rather than per turn.
+- **`live burn`** — what the last window cost (`burnWindowMs`, **15 seconds** by default), projected to an
+  hour. This is the **sudden-loss detector** and the figure the two thresholds act on. It is deliberately
+  short and therefore jumpy: `0` whenever nothing has settled inside the window, which is true rather than
+  broken. A 15-second window is the price of noticing within seconds instead of minutes.
+- **`average burn`** — that turn's cost divided by its elapsed time. A **running average**, recomputed once a
+  second against the live clock and **frozen** when the turn ends, which is what makes two finished tasks
+  comparable: one turn's rate is a fact about that task, not about the profile's recent mood.
 - **`session`** — every turn in this conversation *plus every subagent session beneath it*. A fan-out bills in
   the children, so counting only the session you are looking at would report the calm, not the fire. The
   `N agents` suffix tells you how many are in flight.
-- **`burn`** — spend over the last window (15 minutes by default) projected to an hourly rate. This is the
-  early warning: it moves within a minute of a fan-out starting, long before the turn finishes.
 
-`warn` turns the dot amber and tints the burn figure once the projection crosses `burnWarnUsdPerHour`. The dot
-survives collapsing the panel, so a runaway is visible from the pill.
+Two rates rather than one, because one number hid both: averaging a 15-second window into a task-long mean
+gives a figure that is neither immediate enough to catch a runaway nor stable enough to compare tasks.
+
+Because the whole point is spotting the expensive task, **`this turn` and both burns count the agents that
+turn spawned**, attributed by time window rather than by turn number. A subagent has its own private turn
+sequence, so summing only the conversation's own turns would report a calm rate while sixty agents burn.
+
+The settings tab lists recent turns **hottest first** — cost, rate and duration — so the expensive tasks are
+identifiable after the fact rather than only while they run.
+
+### The two thresholds, and the one that stops the turn
+
+Both are expressed **in the balance's own currency**: CNY per hour on a CNY account, USD per hour on a USD one.
+
+- **`burnWarnPerHour`** turns the dot amber and tints the live burn figure. Purely informational.
+- **`terminateAbovePerHour`** goes further: when the live burn crosses it, the plugin **interrupts the running
+  turn**, exactly as pressing stop does, and the dot turns red.
+
+It is **off by default (`0`)**, deliberately. Stopping a task is destructive and the rate is an estimate, so it
+has to be asked for. When it does fire: the stop is latched per turn number, so one runaway turn is interrupted
+once rather than once per poll; queued input you have already typed is preserved; and the session log records
+`turn/end` with `reason: { kind: "aborted", reason: { kind: "hook", reason: "dsh-budget-watcher/over-budget" } }`,
+so the turn's end has a stated cause rather than looking like a crash. See
+[Known limitations](#known-limitations) for how precise the turn targeting is, which is the honest caveat.
+
+Both thresholds and the burn window are on the settings tab.
+
+### The chart
+
+Under the figures, and above the refresh row, the panel draws this turn's live burn rate against its own
+elapsed time — `d(currency)/dt` for the turn in hand. It is on by default and can be switched off
+(`graphEnabled`).
+
+It spans the panel's full content width, so it lines up exactly with the `this turn` row — and it **cannot make
+the panel any wider than the text already does**, which is what keeps the panel narrow.
+
+- **The x-axis is the turn, not a window.** It grows one second at a time while the turn runs and stops the
+  moment the turn ends, so the picture is one task start-to-finish rather than a sliding window that forgets
+  what it saw. A frozen chart is a finished turn's whole history.
+- **The y-axis only ever grows**, and only when a new high-water mark is set. It never rescales downwards
+  under the line mid-turn, which would make a falling rate look like a cliff. Gridlines land on 1, 2 or 5 times
+  a power of ten, and the peak is labelled in the chart's accessible description.
+- **Blue** is the live burn, **amber** is `burnWarnPerHour`, and **red** is `terminateAbovePerHour` — drawn
+  only when that is above `0`, since a stop line at "off" would mean nothing. The caption beside each line
+  takes that line's colour, so the pairing survives both themes.
+- A threshold above the drawn range is pinned to the top edge, dashed and marked `▲`, rather than dropped.
+  Hiding the line you set would be worse than showing it out of scale.
+- **Every gridline on an axis shares one precision**, chosen from the step, so an axis reads `¥0 / ¥20 / ¥40`
+  rather than `¥10` above `¥5.00`.
+- **The line is anchored to the axis origin.** Nothing has been spent at `t=0`, so the rate there is honestly
+  zero; starting at the first settled step instead made the left of the plot look like missing data.
+- The line is the same windowed figure as the `live burn` row, so the two cannot disagree; the host samples it
+  at each settled step and the panel extends it to now once a second.
 
 ### Where the numbers come from
 
@@ -84,7 +143,7 @@ Two details make the difference between an estimate and a wrong number:
   silently drop the cost of every retry.
 
 Peak and off-peak rates are applied per call from the timestamp (peak is 01:00–04:00 and 06:00–10:00 UTC,
-Monday to Friday). `reasoningTokens` is recorded but never priced separately: it is a subset of output tokens,
+Monday to Friday, which is 09:00–12:00 and 14:00–18:00 Beijing time on the same days). `reasoningTokens` is recorded but never priced separately: it is a subset of output tokens,
 so charging for it as well would double-bill.
 
 
@@ -166,13 +225,17 @@ A patch replaces the row's whole `config` object, so keep every override togethe
 | `endpoint` | *(the provider's)* | Override the balance endpoint. Intended for testing against a stand-in server. |
 | `refreshIntervalMs` | `60000` | How long one answer is reused before the next request. Minimum `15000`. |
 | `requestTimeoutMs` | `10000` | Deadline for one balance request. |
-| `currency` | `auto` | `auto` prefers CNY, then the first wallet returned. Or an explicit code such as `CNY` / `USD`. |
+| `currency` | `auto` | Which currency the **cost figures and both thresholds** are shown in. `auto` follows the featured balance wallet; `CNY` or `USD` force it. A closed set, because DeepSeek publishes rates in exactly those two currencies. |
 | `allowNonLoopback` | `false` | Allow the widget to read balance when the GUI is served on a non-loopback address. |
 | `costEnabled` | `true` | Estimate what recent turns cost from the usage the provider already reports. Spends nothing. |
-| `burnWindowMs` | `900000` | Window for the recent-spend rate, in milliseconds (minimum `60000`). This is the runaway warning. |
-| `burnWarnUsdPerHour` | `2` | Projected USD per hour above which the panel flags the spend. `0` disables the warning. |
-| `usdToCny` | `7.2` | Rate used to show USD API spend beside a CNY balance. An approximation, and yours to set. |
-| `costCurrency` | `auto` | Currency for cost figures: `auto` follows the featured balance currency, or an explicit `CNY` / `USD`. |
+| `graphEnabled` | `true` | Draw the live-burn chart in the panel. Turning it off leaves every figure in place. |
+| `burnWindowMs` | `15000` | Window for the **live** burn rate, in milliseconds (minimum `5000`). Short on purpose: this is the figure that catches a sudden loss. |
+| `burnWarnPerHour` | `2` | Per-hour spend above which the panel turns amber, in the balance's currency. `0` disables the warning. |
+| `terminateAbovePerHour` | `0` | Per-hour spend above which the **running turn is interrupted**, in the balance's currency. `0` — the default — disables it. |
+
+There is no exchange-rate setting, because there is no exchange rate: costs are priced from DeepSeek's
+**published CNY or USD rate card**, matching whichever currency the featured balance is held in. See
+[Where the numbers come from](#where-the-numbers-come-from).
 
 To disable the plugin without uninstalling it:
 
@@ -187,10 +250,17 @@ The panel's **gear button** opens a *Budget* tab in DSH's right sidebar: every o
 field, with Save. The gear only appears when a tab could actually be registered, so it is never a control that
 does nothing.
 
-Durations are shown in the units you think in — the refresh interval in **seconds**, the burn window in
-**minutes** — and converted back on save. The API key field is write-only: it starts blank, blank means
-*leave it alone*, and clearing it removes the key from the profile. The running key value is never sent to the
-page; the form only knows whether one is set.
+Durations are shown in the units you think in — the refresh interval and the live burn window in **seconds** —
+and converted back on save. The API key field is write-only: it starts blank, blank means *leave it alone*, and
+clearing it removes the key from the profile. The running key value is never sent to the page; the form only
+knows whether one is set.
+
+`Currency` is a **drop-down of `auto` / `CNY` / `USD`**, not a text field: those are the only currencies
+DeepSeek publishes rates in, so anything else could only ever be wrong. The two thresholds are labelled with
+the currency the balance is actually held in.
+
+The form **scrolls**, and Save is pinned to the bottom of it, so the button stays reachable however long the
+settings and the recent-turns list grow. The turn list is bounded and scrolls separately.
 
 Saving goes through DSH's own config editor, so the change lands in your profile's `cordis.patch.yml` and is
 applied by the normal loader path — the same file and the same mechanism you would edit by hand:
@@ -199,9 +269,10 @@ applied by the normal loader path — the same file and the same mechanism you w
 - id: budget-watcher
   name: dsh-budget-watcher
   config:
-    currency: USD
-    burnWindowMs: 600000
-    burnWarnUsdPerHour: 3.5
+    currency: CNY
+    burnWindowMs: 15000
+    burnWarnPerHour: 3.5
+    terminateAbovePerHour: 0
 ```
 
 A value set back to its default is removed rather than written, so the row goes back to inheriting. Config
@@ -293,7 +364,9 @@ restart, and edits to `lib/client.cjs` are served on the next request.
 | No cost rows at all | Check `cost.reason` in `GET /dsh-budget-watcher/balance`: `disabled` means `costEnabled: false`; `no-live-sessions` means no session is live in the host process; `failed` means the ledger threw and the warning is in the dsh log. If `pluginVersion` is missing from that response, the host is running a **stale module** — restart DSH. |
 | Balance shows but a feature you just added does not | The host module was imported before your edit and is cached. Restart DSH; see limitation 14. |
 | `N turn(s) unpriced` | A turn ran on a model missing from the rate card. Add it to `PRICING` in `lib/cost.js`, or ignore it if you know that turn was not a DeepSeek one. |
-| The burn row is amber but nothing feels wrong | `burnWarnUsdPerHour` is being crossed. Raise it, or set it to `0` to turn the warning off. |
+| Live burn is amber but nothing feels wrong | `burnWarnPerHour` is being crossed. Raise it, or set it to `0` to turn the warning off. A short window makes this jumpy, so a single spike is usually not worth acting on. |
+| The dot is red and the turn stopped by itself | `terminateAbovePerHour` fired. The reason is in the log as `dsh-budget-watcher/over-budget`; raise the limit or set it to `0`. |
+| Live burn reads ¥0.00/h mid-turn | Correct, not broken: nothing has settled inside the window. 15 seconds is short by design. Check `average burn` or `session` instead. |
 | Cost figures look too small | The session total only covers spend observed since the plugin loaded. See limitation 19. |
 
 ## Known limitations
@@ -353,9 +426,11 @@ Recorded honestly, because each one is a decision rather than an oversight.
     Chinese public holidays is not — the calendar is not published in the API docs and changes yearly. A
     holiday weekday is therefore priced at the peak rate, which **over**states cost. That is the safe
     direction for a spend warning, and it is the only part of the peak calculation that is wrong.
-18. **The exchange rate is yours, not fetched.** DeepSeek bills in USD and this account's balance is in CNY, so
-    the panel converts at `usdToCny` (default `7.2`) and marks every converted figure with `≈`. The plugin has
-    no rate source; silently inventing one would make a spend warning less trustworthy, not more.
+18. **The rate card is two published tables, not one converted into the other.** DeepSeek publishes its prices
+    in **both** CNY and USD, and the plugin carries both, pricing in whichever currency you select — or, under
+    `auto`, whichever the featured balance is held in. No exchange rate is involved anywhere, which also means
+    the figures are not a conversion of each other: flash off-peak output is $0.60 or ¥4 (an implied ~6.67)
+    while a spot rate is nearer 7.2. Only those two currencies are supported; anything else falls back to USD.
 19. **Only the live agent tree is counted.** Spend is attributed to sessions that are live at poll time, plus
     any already remembered this process. A fan-out that finished **before** the plugin loaded is not in the
     live session list, so its subagent spend is missing from the session total — the root session's own turns
@@ -399,6 +474,106 @@ Recorded honestly, because each one is a decision rather than an oversight.
     a fiber reload are simpler and were verified applying a real edit; a settings-heavy future may prefer the
     other trade.
 
+### Turn cost and burn
+
+32. **Burn is a cumulative average, not an instantaneous rate.** Cost arrives in lumps as each step settles, so
+    an instantaneous rate would spike at every step and read zero between them. Cost-so-far over time-so-far is
+    stable while a turn runs and lands exactly on the turn's true average when it closes — which is the point,
+    since it is meant to characterise a finished task.
+33. **A running turn's rate decays between steps.** The numerator only moves when a step settles; the
+    denominator moves every second. A long silence mid-turn therefore makes the figure drift down, correctly
+    but unintuitively.
+34. **The live figure is computed in the browser.** The host sends cost and the turn's start; the panel ticks
+    elapsed time locally at 1 Hz and recomputes the rate. That keeps the display live without a request per
+    second. The numerator refreshes on a tighter 2 s poll while a turn runs, up from the configured interval,
+    which is real extra load on the host route during a turn.
+35. **A turn's figure includes its descendants, attributed by time window.** That is deliberate — a fan-out
+    bills in the children — but it means a long-lived subagent from an earlier turn whose calls land inside
+    this turn's window is counted here. Work that continues *after* the turn ends is not, so a frozen figure
+    can understate a fan-out that outlives its root turn.
+36. **The live rate flickers, by design.** A 15-second window reads `0` whenever nothing has settled inside it,
+    which happens during any step that takes longer than 15 seconds to come back. That is a true reading — no
+    spend settled in that window — not a bug, but it does mean the figure alternates between zero and a spike
+    on a turn with slow steps. `average burn` is the stable companion for that reason.
+37. **Turn history is capped and root-scoped.** The comparison table keeps the last 10 closed turns of the
+    conversation and is not persisted, so it is empty after a restart and cannot compare across sessions.
+38. **The elapsed clock trusts the host.** The payload carries the host's `serverNow` and the page corrects for
+    the offset, so a drifted browser clock cannot distort a turn's duration. It assumes both are the same
+    machine, which holds for the loopback-only route this plugin serves.
+
+### Terminating a turn
+
+39. **Turn targeting is advisory, not atomic.** This is the important one. An `Agent` outlives any one turn, so
+    holding a reference identifies the *agent*, not the turn — there is a real window between reading the live
+    burn and calling `cancel` in which the turn can end and a successor begin, and nothing in the API can
+    cancel "turn N". The plugin samples the open-turn boundary immediately before and after the call, which
+    cannot prevent a wrong-turn abort but does convert it from a silent one into a logged
+    `raced-next-turn`. If it fires when you did not expect, read that line.
+40. **It is off by default, and should stay off until you have watched the rates.** `terminateAbovePerHour`
+    defaults to `0`. Stopping a task is destructive and the number it acts on is an estimate built from a
+    15-second window, so a threshold set too low will interrupt legitimate work. Set `burnWarnPerHour` first,
+    watch what your real turns actually burn, then set the limit above that.
+41. **The check runs on the read route.** The interrupt is decided inside the balance `GET`, which is a side
+    effect on a read — not lovely. The burn rate is only computed there, and the alternative was a second timer
+    recomputing the same ledger on its own schedule. Being off by default is what makes the compromise
+    acceptable.
+42. **The exit point is cooperative.** `cancel` aborts the in-flight request and drains or skips tool calls, but
+    a tool already executing is drained rather than force-killed, and whether the provider socket is torn down
+    immediately is adapter-dependent. A turn may finish its current tool call before it stops.
+43. **Descendants are not reliably stopped.** A foreground in-process subagent inherits the parent's abort
+    signal and does stop; background and continuable children may not. The plugin stops the root turn and does
+    not walk the tree, so a fan-out's background agents can outlive the turn that was terminated.
+44. **Only one stop per turn, and it is not re-armed.** The fire is latched on the turn number, so a turn is
+    interrupted at most once. A later turn can be stopped normally, but if the *same* turn somehow continues
+    after being cancelled, it will not be stopped again.
+
+### The settings tab
+
+45. **The form owns its own scrolling.** The sidebar pane gives the tab a bounded height and does not scroll it,
+    so the form is a scroll container and Save is pinned to its bottom; the recent-turns list is separately
+    capped and scrolls. Without this the content below the fold was simply unreachable — which is exactly the
+    bug this arrangement fixes.
+
+### Currency
+
+46. **The balance row cannot follow the `currency` setting.** Costs and thresholds are priced, so they can be
+    expressed in whichever currency you choose. The balance is not priced — it is a number the API returns in the
+    account's own currencies — so it can only ever be shown in a currency the account actually holds. Forcing
+    `USD` on an account with no USD wallet therefore leaves the balance in CNY and the costs in USD, and the
+    settings tab says so in a line under the thresholds. Showing the balance in USD would mean converting it, and
+    the plugin has no exchange-rate source by design; inventing one would put a made-up number next to real ones.
+47. **Every cost figure moves together.** The 15 s live burn, the turn average, the session total and each row of
+    the recent-turns table are all re-priced from the token counts when the currency changes, so the comparison
+    table stays internally comparable. Mixing a table of past turns priced in one currency with a current turn
+    priced in another would make the table's one job — comparing tasks — impossible.
+
+### The chart
+
+48. **The chart needs a turn.** With no turn yet in the conversation there is no timeline to draw, so the chart
+    is absent rather than empty. It also does not persist: the series is rebuilt from the session log on each
+    poll, so it survives a panel reload and a DSH restart, but it is not stored anywhere of its own.
+49. **The line is a windowed rate, so it steps down as well as up.** It is the same 15-second figure as the
+    `live burn` row, which means a quiet stretch longer than the window drops the line back towards zero. That
+    is the rate being honest, not the chart misbehaving.
+50. **The y-axis latches to the high-water mark.** It only changes when a new maximum appears, so a rate that
+    falls will not bring the scale down with it — the line dips inside a fixed frame instead of the whole
+    picture rescaling under you. The cost is that a long turn's later detail can look flat once an early spike
+    has set a tall ceiling.
+51. **A threshold above the range is drawn pinned, not omitted.** It sits on the top edge, dashed and marked
+    `▲`. Reading a value off a pinned line is not possible; the label carries the real number.
+52. **The series is thinned, not truncated.** A fan-out can settle hundreds of steps; past 240 samples the host
+    thins them evenly so the shape of the whole turn survives rather than only its first half.
+53. **Gridlines are round numbers, not round fractions of the data.** The step is 1, 2 or 5 times a power of
+    ten, which keeps the axis legible at any magnitude but means the top line is usually above the peak rather
+    than exactly on it.
+54. **The chart's height is a ratio, and the panel's width is its text's.** The chart is a fixed proportion of
+    the content box (240:100), so it tracks whatever width the widest text row asks for. A very narrow panel
+    therefore shrinks the axis labels with everything else — below roughly 100 CSS pixels of chart width they
+    stop being comfortable, and the honest fix there is to switch the chart off.
+55. **The panel's width is set by its longest text row**, which in practice is `this turn ≈¥0.78 / ¥13.05 · 19
+    turns`. Nothing else in the panel can widen it: the chart is deliberately prevented from contributing its own
+    intrinsic width, and the balance and header are shorter. If that row grows, the panel grows with it.
+
 ## Verified against
 
 - DSH `0.2.0-rc.2` on Windows, installed with `dsh plugin --profile <name> add link:<path>`.
@@ -413,10 +588,37 @@ Recorded honestly, because each one is a decision rather than an oversight.
   carried a usage report, every one on a priced model, and the arithmetic reproduced DeepSeek's own identity
   exactly — one real turn of 67,223 uncached + 10,244,352 cache-read + 138,018 output tokens priced to
   `$0.1236`, matching the published rates to the cent.
-- `node --test`, 90 tests covering the payload normalizer, the cost model and rate card, the session ledger
-  (fan-out, descendants, finish-must-not-subtract, wrong-session isolation), the route (caching, single flight,
-  `?refresh=1`, the fence, the cost payload, every failure mode) and the client bundle (registration shape,
-  slot mounting, drag scoping, session handshake, rendering per host state, unmount cleanup).
+- A real settings write end to end: `POST /dsh-budget-watcher/config` on a running profile put the row's
+  `config` into that profile's `cordis.patch.yml`, and re-reading the payload showed the new values effective.
+- `node --test`, **129 tests** covering the payload normalizer, the cost model and **both rate cards**, the
+  session ledger (fan-out, descendants, finish-must-not-subtract, wrong-session isolation, per-turn burn,
+  frozen duration and **the windowed burn series**), the route (caching, single flight, `?refresh=1`, the fence,
+  the config write, the cost payload, **the terminate path firing once and only once**, every failure mode) and
+  the client bundle (registration shape, slot mounting, drag scoping, session handshake, live versus average
+  burn, the settings form's scroll container and pinned Save, **the chart's polyline, thresholds, on/off switch,
+  the absence of a stop line at `0`, the caption fills, the one-precision axis, the axis-origin anchor and the
+  containment that stops the chart widening the panel**, **the combined turn/session row**, rendering per host
+  state, unmount cleanup).
+- **Two real browser screenshots** of the running panel. The first found the fixed-size chart, the invisible
+  black threshold caption and the mixed-precision axis. The second found that the chart was still setting the
+  panel's width: `<svg>` is a replaced element with a 300×150 intrinsic size, so its default width — not the
+  text — was pinning the panel at its cap. Neither defect was reachable by assertion, and the second was
+  reachable only by measuring a screenshot against the CSS.
+- The termination primitive read out of DSH's own source rather than guessed: `ctx.get("agents").get(id)` →
+  `agent.cancel({ kind: "hook", reason }, { keepInbox: true })` is the same call the stop button's Remote
+  wrapper makes (`dsh-api-session-controller`), and `dsh-deepseek-account` sets the precedent for a
+  programmatic `hook`-caused stop.
+
+> [!NOTE]
+> **The chart has been seen running twice**, and both times the screenshot found what tests could not. The first
+> showed a chart at full panel width, a threshold caption rendering black on the dark theme (an SVG `<text>` with
+> no `fill` defaults to black), and an axis mixing `¥10` with `¥5.00`. The second showed the panel was still too
+> wide — the chart's 300 px intrinsic width, not the text, was setting it.
+>
+> Those are fixed and now asserted, but the *fixes* have not been seen. Still **test-verified only**: the live
+> per-second burn and the turn-comparison table (0.4.0), the settings form's scrolling and pinned Save (0.5.1),
+> and the chart's width and origin anchor (0.6.2). Tests can prove the elements and the CSS rules exist; only
+> eyes can say whether they *look* right — which this project has now learned three times.
 
 ## Changelog
 

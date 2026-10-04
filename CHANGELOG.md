@@ -11,6 +11,305 @@ section of the README's [Known limitations](README.md#known-limitations) it move
 
 Nothing yet.
 
+## [0.6.2] — 2026-10-03
+
+The panel was wide because the chart was setting its width, not the text.
+
+### Fixed
+
+- **The chart was pinning the panel at its 300px cap.** `<svg>` is a replaced element with a default intrinsic
+  size of 300×150, and a percentage width counts as `auto` while a shrink-to-fit container works out its width —
+  so `width:50%` did not shrink the chart's contribution, the SVG's 300 px default became the panel's width, and
+  the panel sat at its maximum. The chart now sits in a wrapper with `contain:inline-size`, which makes its
+  width independent of its contents, so **the longest text row decides the panel's width again**. Measured from
+  the screenshot against the CSS: the content box was 276 px and the chart 138 px, exactly 50% of it.
+- **The burn line did not start at the axis.** It began wherever the first step settled — around `0:20` in the
+  screenshot — which made the left of the plot look like missing data. The series is now anchored to a zero
+  point at `t=0`, which is also the honest reading: nothing had been spent yet.
+
+### Changed
+
+- **The chart spans the panel's full content width and is left aligned**, so it lines up exactly with the
+  `this turn` row rather than floating in the middle at half width. The ratio is now 240:100 (was 4:3 at half
+  width), chosen so the height stays what it was and one unit stays near one CSS pixel — the 9-unit axis labels
+  do not shrink with the box.
+
+### Added
+
+- Two tests: the chart's rule is full width with the containment that stops it widening the panel, and the
+  polyline's first point sits on the axis origin at zero.
+
+### Verified, and how
+
+- Found by **measuring a second screenshot against the CSS**, not by a test — the same way the previous round's
+  three defects were found. The arithmetic is recorded above so the reasoning is checkable rather than asserted.
+
+## [0.6.1] — 2026-10-03
+
+The chart, fixed against a screenshot of it actually running.
+
+### Fixed
+
+- **The threshold caption was black on the dark theme.** An SVG `<text>` with no `fill` defaults to black, and
+  `dshbw-chart-key` set only a font size — so `warn ¥15 ▲` was very nearly invisible. Each caption now takes the
+  colour of the line it annotates, which is both readable and the obvious pairing to look at.
+- **The axis mixed three kinds of number.** `compactAmount` chose its own precision per value, producing `¥10`
+  above `¥5.00` above `¥0.00`. The precision now comes from the gridline step, so one axis reads `¥0 / ¥20 /
+  ¥40`, and threshold captions use the precision the value itself needs (`¥2`, not `¥2.00`).
+- **The axis was coarser than intended.** Aiming at three intervals made a ¥60.48 peak step by 50, giving
+  `¥0 / ¥50 / ¥100`; aiming at four gives `¥0 / ¥20 / ¥40 / ¥60 / ¥80`.
+
+### Changed
+
+- **The chart is a sparkline-sized card: half the panel's content width, centred, at 4:3** (was full width at
+  2:1). It was taking more of the panel than the figures it illustrates. The SVG's viewBox moved to 120×90 to
+  match, so one unit stays near one CSS pixel and the 9-unit labels do not shrink with the box.
+- **`this turn` and `session` are now one row:** `this turn ≈¥0.78 / ¥13.05 · 19 turns`. What this turn cost
+  against what the conversation has cost is one thought; splitting it over two rows spent a line on nothing. The
+  session total keeps a row of its own only when there is no turn to pair it with.
+
+### Added
+
+- Four tests: the caption fills exist, the chart rule is 50% at 4:3, every gridline on an axis shares one
+  precision, and the standalone session row still appears with no turn.
+
+### Verified, and how
+
+- Found by a **screenshot of the running panel**, not by a test. Full-width chart, invisible caption and
+  mixed-precision axis were all live defects that 124 passing tests did not and could not catch. The README's
+  "Verified against" section now records the screenshot as evidence, and says plainly which fixes have still
+  not been seen running.
+
+## [0.6.0] — 2026-10-03
+
+The burn chart, drawn in the panel.
+
+### Added
+
+- **A live-burn chart in the panel**, below the figures and above the refresh row: this
+  turn's burn rate against its own elapsed time, as an inline SVG with no dependencies.
+  `graphEnabled`, on by default, turns it off without touching any figure.
+- **The x-axis is the turn, not a window.** It grows one second at a time while the turn
+  runs and stops when the turn does, so the chart shows one task start-to-finish instead
+  of a sliding window that forgets what it saw. A frozen chart is a finished turn's
+  history.
+- **The y-axis only ever grows**, and only when a new high-water mark is set, so a
+  falling rate never rescales the frame down under the line. Gridlines land on 1, 2 or 5
+  times a power of ten, and the peak is named in the SVG's accessible description.
+- **Blue is the rate, amber is `burnWarnPerHour`, red is `terminateAbovePerHour`** — the
+  red line drawn only when that is above `0`, since a stop line at "off" would claim
+  something that cannot happen.
+- **The burn series is computed host-side** (`thisTurn.series`): the trailing-window rate
+  evaluated at each settled step, thinned to at most 240 samples. Computing it once in
+  Node rather than twice, in two languages, is what keeps the drawn line and the
+  `live burn` row the same number.
+
+### Decisions worth recording
+
+- **Sampled at billing events, not on a clock.** Between two settled steps nothing has
+  been spent, so the rate is an average of an unchanged total and there is no new fact to
+  draw. The panel extends the line from the last sample to now, once a second, using the
+  same figure the row shows.
+- **A series that steps down is correct.** It is a 15-second window, so a quiet stretch
+  longer than that drops the line back towards zero. That is the measurement being
+  honest, and hiding it would misrepresent the rate.
+- **A threshold above the data range is pinned to the top edge, dashed and marked `▲`**
+  rather than omitted. Dropping the line the user set would be worse than showing it out
+  of scale; the label still carries the real number.
+- **The chart is called, not mounted** (`BurnChart({…})` rather than
+  `React.createElement(BurnChart, …)`). It holds no hooks, and inlining it keeps the chart
+  in the same element tree the panel returns — which is the difference between the tests
+  being able to see it and not.
+
+### Known limitations at this version
+
+The README list gains 48–53: the chart needs a turn and is not persisted of its own; the
+line steps down as well as up; the y-axis latches to the high-water mark, so later detail
+can look flat behind an early spike; a pinned threshold cannot be read off; the series is
+thinned past 240 samples; and gridlines are round numbers rather than exact fractions of
+the peak.
+
+## [0.5.2] — 2026-10-03
+
+The `currency` setting was ignored.
+
+### Fixed
+
+- **Choosing `CNY` or `USD` now actually changes the currency of the cost figures and
+  both thresholds.** It previously expressed only a *wallet preference*, while the
+  cost currency followed the featured wallet — so on an account holding only CNY,
+  setting USD did nothing and the COST ESTIMATE section kept reading `CNY/hour`. A
+  currency choice is a display decision, not a claim about which wallets exist.
+- `auto` still follows the featured wallet. The settings tab now says so in a line
+  under the thresholds when the cost currency differs from the balance's, since the
+  two sections then show different currency symbols.
+- Two tests: one asserts that an explicit currency prices from that currency's rate
+  card (`$0.15`, not `¥1.00`), the other keeps `auto` pinned to the featured wallet.
+
+### Documentation
+
+- README: the `currency` row now says it sets the currency of the figures *and* the
+  thresholds; limitation 18 reworded to "whichever you select, or `auto`"; unknowns
+  **46–47** record that the balance row cannot follow the setting, and that every cost
+  figure moves together so the comparison table stays comparable.
+
+## [0.5.1] — 2026-10-03
+
+The settings tab could not be scrolled, which made Save unreachable.
+
+### Fixed
+
+- **The settings form had no scroll container, so everything below the fold was
+  unreachable — including Save, once the recent-turns list was populated.** The
+  sidebar pane gives a tab a bounded height and does not scroll it, so the tab has to
+  scroll itself. `.dshbw-form` is now a scroll container (`height`/`max-height` with
+  `min-height: 0` — the load-bearing part, because a flex child refuses to shrink
+  below its content by default and overflows instead of scrolling). Save is pinned to
+  the bottom of that container with `position: sticky` and its own background, so it
+  stays reachable however long the form grows.
+- **The recent-turns list is capped and scrolls separately.** It grows with the
+  conversation, so leaving it unbounded would have pushed Save out of reach again even
+  once the form scrolled.
+- Two tests lock the arrangement in: one asserts the injected CSS still declares the
+  scroll container, the sticky Save and the bounded turn list; the other asserts the
+  rows are wrapped in that bounded container and that Save is still rendered beside a
+  populated list.
+
+### Documentation
+
+- The README is brought up to date for 0.5.0 as well: the element table now lists
+  `live burn`, `average burn` and the red dot; "What it costs you" explains the two
+  rates and the two thresholds; the configuration table drops
+  `usdToCny`/`costCurrency` for `burnWarnPerHour`/`terminateAbovePerHour` and the 15 s
+  window; the exchange-rate limitation is rewritten as the two-published-tables rule;
+  and unknowns **39–45** cover termination and the settings layout.
+
+## [0.5.0] — 2026-10-03
+
+Burn split into two rates, the rate card made two-currency, and a spend limit that
+stops the turn.
+
+### Changed
+
+- **One burn row became two.** `live burn` is what the last window cost, projected
+  per hour — the figure that catches a sudden loss, and the one the thresholds act
+  on. `average burn` is the turn's own cost over its elapsed time, frozen at its
+  end. They answer different questions, and collapsing them into one number hid
+  both: a short window is jumpy but immediate, a cumulative average smooth but late.
+- **The live window defaults to 15 seconds**, down from 15 minutes. Sensitivity is
+  the point of a live figure. The consequence is real and documented: it reads 0
+  whenever nothing has settled inside the window, which is true rather than broken.
+- **Cost is no longer converted.** `usdToCny` and `costCurrency` are gone. DeepSeek
+  publishes its rate card in **both** CNY and USD, so the plugin carries both tables
+  and prices in whichever currency the featured balance is held in. The published
+  figures are not a clean multiple of one another — flash off-peak output is $0.60
+  or ¥4, an implied ~6.67, against a spot rate nearer 7.2 — so converting was both
+  unnecessary and slightly wrong. Thresholds are now expressed in the balance's own
+  currency, and the currency setting became a closed drop-down of the only three
+  meaningful values: `auto`, `CNY`, `USD`.
+- `burnWarnUsdPerHour` → `burnWarnPerHour`, since the units are no longer USD.
+
+### Added
+
+- **`terminateAbovePerHour`** — when the live burn crosses it, the plugin
+  **interrupts the running turn**, exactly as the stop button does, and the status
+  dot turns red. **Off by default (0)**: stopping a task is destructive and the rate
+  is an estimate, so it has to be asked for. The stop is latched per turn number, so
+  one runaway turn is interrupted once rather than once per poll, and it uses the
+  same primitive the UI uses — `agent.cancel({kind: "hook", reason}, {keepInbox: true})`
+  — with `hook` provenance, so the session log records *why* the turn ended.
+- **Three tests for the stop path**: it fires once and only once, it is inert at 0,
+  and it does nothing when no turn is actually open.
+- `liveBurnPerHour`, `averageBurnPerHour`, `burnWindowMs`, `overTerminate`,
+  `terminateAbovePerHour` and a top-level `terminated` record in the payload, plus a
+  `normalizeCostCurrency` helper and a `COST_CURRENCIES` list.
+
+### Decisions worth recording
+
+- **The turn guard is advisory, and says so.** An `Agent` outlives any one turn, so a
+  reference identifies the agent, not the turn; there is a real window between
+  reading the burn and calling `cancel` in which the turn can end and a successor
+  begin. Nothing in the API can cancel "turn N". The open-turn boundary is therefore
+  sampled immediately before and after the call, which cannot prevent a wrong-turn
+  abort but does convert it from a silent one into a logged `raced-next-turn`.
+- **`keepInbox: true`.** Stopping a runaway must not also discard input the user has
+  already typed.
+- **The termination fires from the read route.** That is a side effect on a GET,
+  which is not lovely, but the burn rate is only computed there; the alternative was
+  a second timer recomputing the same ledger. Being off by default is what keeps the
+  compromise acceptable.
+
+### Fixed
+
+- The currency refactor renamed the cost model's `usd` fields to `cost` throughout,
+  including the ledger's accumulators, so an amount in CNY can no longer be read
+  under a name claiming it is dollars.
+
+## [0.4.0] — 2026-10-02
+
+Burn tracking overhauled into a per-turn figure. Cost prediction was considered and abandoned.
+
+### Changed
+
+- **`last turn` is now `this turn`.** The figure is the turn the user is waiting on, and "last" made it read as
+  something already finished — it took a clarifying question to establish what it meant, which is the label's
+  fault.
+- **`burn` is now the turn's own rate, not a rolling window.** It is that turn's cost divided by its elapsed
+  time, recomputed once a second while the turn runs and **frozen** when it ends. A rolling window describes
+  the profile's recent mood; a frozen per-turn rate is a fact about a task, which is what makes two tasks
+  comparable.
+- **A turn's cost and burn now include the agents it spawned.** Attribution is by time window rather than by
+  turn number, because a subagent has its own private turn sequence and a fan-out bills almost entirely in the
+  children. Summing only the conversation's own turns reported a calm rate while sixty agents burned — the
+  exact case the number exists for.
+- **The warning follows the figure on screen.** It previously tracked the rolling window alone, so an expensive
+  turn stopped being flagged the moment it stopped spending.
+- The panel now tightens its poll to 2 s while a turn is running, up from the configured interval.
+
+### Added
+
+- **A live per-second rate.** The host sends cost, the turn's start and its own clock; the panel ticks elapsed
+  time locally at 1 Hz and recomputes, so the figure moves every second without a request per second. A pulsing
+  dot marks a turn still in flight, so a number that is still growing is visibly still growing.
+- **A turn-comparison table** in the settings tab: recent closed turns, **hottest first**, with cost, rate and
+  duration. This is the "which tasks are expensive" view; the panel deliberately shows only the turn in hand.
+- **`serverNow`, `startedAt`, `endedAt`, `durationMs`, `burnPerHour` and a `turns` history** in the cost
+  payload.
+- Tests for the live-versus-frozen distinction, the duration arithmetic, the fan-out attribution change and the
+  hottest-first ordering — 108 total.
+
+### Fixed
+
+- **The gear button never appeared, so 0.3.0's settings tab was unreachable in a real profile.** `apply` guarded
+  the tab registration with `ctx.get("sidebarRight") !== undefined`, and `ctx.get` only sees services that are
+  *already* provided — the right sidebar is often provided after this plugin materializes, so the guard skipped
+  the registration permanently. Found by opening the panel in a browser and noticing the button was absent; the
+  test suite had passed because its fake context always reported the services. The registration is now
+  unconditional and `ctx.inject` fires whenever they arrive.
+
+### Decisions worth recording
+
+- **Cost prediction was evaluated and dropped.** A turn's LLM cost is roughly *quadratic* in its step count,
+  because each step re-sends the whole conversation: input ≈ `N·B + g·N²/2`. The unpredictable variable is
+  therefore `N` — how many steps an autonomous agent decides to take and how wide it fans out — not the prompt
+  size, which `ctx.tokenMeter.measure()` already prices exactly. Output tokens are not predictable at all, and
+  a naive token-count predictor would badly over-estimate long turns because the cached prefix dominates the
+  token count while costing little. Rate tracking answers the same question — "is this running away?" — with a
+  measurement instead of a guess.
+- **Cumulative average, not an instantaneous rate.** Cost arrives in lumps as steps settle; an instantaneous
+  rate would spike at every step and read zero between them. Cost-so-far over time-so-far is stable and settles
+  on the turn's true average.
+- **History is capped at 10 turns and not persisted.** It is a panel figure for comparing the tasks in front of
+  you, not an analytics store.
+
+### Known limitations at this version
+
+The README list gains 32–38. Highlights: the rate decays between steps (the numerator only moves when a step
+settles); the live figure is computed in the browser against the host's clock; a turn's window can absorb an
+earlier subagent's late calls but not work that outlives the turn; the frozen rate lingers, so an amber dot is a
+record of the last task rather than a claim about now; and the comparison table is capped, root-scoped and
+in-memory.
+
 ## [0.3.0] — 2026-10-02
 
 A compact panel and an editable settings tab.
@@ -207,7 +506,14 @@ API-key balance is not the signed-in Platform account balance; the route is loop
 `allowNonLoopback` is set; polling rather than push, with a 15 s floor; and a new install requires a profile
 restart.
 
-[Unreleased]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/NeutronStar714/dsh-budget-watcher/releases/tag/v0.1.0

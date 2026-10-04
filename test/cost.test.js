@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PRICING, convertUsd, foldTurns, isPeak, pricingFor, summarizeCost, usageCost } from "../lib/cost.js";
+import { COST_CURRENCIES, PRICING, foldTurns, isPeak, normalizeCostCurrency, pricingFor, summarizeCost, usageCost } from "../lib/cost.js";
 
 /** 2026-10-02 is a Friday, so weekday rules apply. */
 const FRI = (hhmm) => Date.parse(`2026-10-02T${hhmm}:00Z`);
@@ -31,11 +31,20 @@ test("weekends are off-peak in full", () => {
 });
 
 test("legacy model names are priced at the Flash rate, as DeepSeek documents", () => {
-  assert.equal(pricingFor("deepseek-flash"), PRICING["deepseek-flash"]);
-  assert.equal(pricingFor("deepseek-v4-flash"), PRICING["deepseek-flash"]);
-  assert.equal(pricingFor("deepseek-v4-flash-vision-exp"), PRICING["deepseek-flash"]);
-  assert.equal(pricingFor("DeepSeek-Flash"), PRICING["deepseek-flash"], "matching is case-insensitive");
-  assert.equal(pricingFor("deepseek-v4-pro"), PRICING["deepseek-v4-pro"]);
+  // `pricingFor` flattens the card to one currency's rates, so the USD book is
+  // the comparable shape.
+  const flash = { label: PRICING["deepseek-flash"].label, ...PRICING["deepseek-flash"].USD };
+  const pro = { label: PRICING["deepseek-v4-pro"].label, ...PRICING["deepseek-v4-pro"].USD };
+  assert.deepEqual(pricingFor("deepseek-flash"), flash);
+  assert.deepEqual(pricingFor("deepseek-v4-flash"), flash);
+  assert.deepEqual(pricingFor("deepseek-v4-flash-vision-exp"), flash);
+  assert.deepEqual(pricingFor("DeepSeek-Flash"), flash, "matching is case-insensitive");
+  assert.deepEqual(pricingFor("deepseek-v4-pro"), pro);
+  // The CNY book is a different published table, not a converted copy.
+  assert.deepEqual(pricingFor("deepseek-flash", "CNY"), {
+    label: "DeepSeek-V4.1-Flash",
+    ...PRICING["deepseek-flash"].CNY,
+  });
 });
 
 test("an unknown model has no price at all, rather than a guessed one", () => {
@@ -48,7 +57,7 @@ test("an unknown model has no price at all, rather than a guessed one", () => {
 test("off-peak Flash output is billed at the published output rate", () => {
   const priced = usageCost({ outputTokens: 1_000_000 }, "deepseek-flash", FRI("12:00"));
   assert.equal(priced?.peak, false);
-  assert.equal(priced?.usd, 0.6);
+  assert.equal(priced?.cost, 0.6);
 });
 
 test("cached and uncached input are billed at their own rates, as separate buckets", () => {
@@ -56,15 +65,15 @@ test("cached and uncached input are billed at their own rates, as separate bucke
   // 1M uncached at $0.15 + 400k cache-read at $0.003.
   const priced = usageCost({ inputTokens: 1_000_000, cacheReadTokens: 400_000 }, "deepseek-flash", FRI("12:00"));
   assert.equal(priced?.cacheMissTokens, 1_000_000, "cache reads are not subtracted from the uncached bucket");
-  assert.equal(Math.abs((priced?.usd ?? 0) - (0.15 + 0.0012)) < 1e-12, true, `got ${priced?.usd}`);
+  assert.equal(Math.abs((priced?.cost ?? 0) - (0.15 + 0.0012)) < 1e-12, true, `got ${priced?.cost}`);
 });
 
 test("a fully cached prompt is nearly free, and a fully fresh one is not", () => {
   const cached = usageCost({ inputTokens: 0, cacheReadTokens: 1_000_000 }, "deepseek-flash", FRI("12:00"));
   const fresh = usageCost({ inputTokens: 1_000_000, cacheReadTokens: 0 }, "deepseek-flash", FRI("12:00"));
   assert.equal(cached?.cacheMissTokens, 0);
-  assert.equal(cached?.usd, 0.003);
-  assert.equal(fresh?.usd, 0.15);
+  assert.equal(cached?.cost, 0.003);
+  assert.equal(fresh?.cost, 0.15);
 });
 
 test("a large cached prefix does not cancel the uncached remainder", () => {
@@ -73,13 +82,13 @@ test("a large cached prefix does not cancel the uncached remainder", () => {
   // to zero and report the turn as almost free.
   const priced = usageCost({ inputTokens: 50_000, cacheReadTokens: 1_000_000 }, "deepseek-flash", FRI("12:00"));
   assert.equal(priced?.cacheMissTokens, 50_000);
-  assert.equal(Math.abs((priced?.usd ?? 0) - (50_000 * 0.15 + 1_000_000 * 0.003) / 1_000_000) < 1e-12, true);
+  assert.equal(Math.abs((priced?.cost ?? 0) - (50_000 * 0.15 + 1_000_000 * 0.003) / 1_000_000) < 1e-12, true);
 });
 
 test("DeepSeek has no cache-write line, so cache writes bill as uncached input", () => {
   const priced = usageCost({ inputTokens: 100_000, cacheWriteTokens: 900_000 }, "deepseek-flash", FRI("12:00"));
   assert.equal(priced?.cacheMissTokens, 1_000_000);
-  assert.equal(priced?.usd, 0.15);
+  assert.equal(priced?.cost, 0.15);
 });
 
 test("peak costs exactly twice off-peak", () => {
@@ -87,12 +96,12 @@ test("peak costs exactly twice off-peak", () => {
   const off = usageCost(usage, "deepseek-v4-pro", FRI("12:00"));
   const peak = usageCost(usage, "deepseek-v4-pro", FRI("02:00"));
   assert.equal(peak?.peak, true);
-  assert.equal(Math.abs((peak?.usd ?? 0) - 2 * (off?.usd ?? 0)) < 1e-12, true);
+  assert.equal(Math.abs((peak?.cost ?? 0) - 2 * (off?.cost ?? 0)) < 1e-12, true);
 });
 
 test("missing or nonsense token fields price as zero rather than NaN", () => {
-  assert.equal(usageCost({}, "deepseek-flash", FRI("12:00"))?.usd, 0);
-  assert.equal(usageCost({ inputTokens: -5, outputTokens: Number.NaN }, "deepseek-flash", FRI("12:00"))?.usd, 0);
+  assert.equal(usageCost({}, "deepseek-flash", FRI("12:00"))?.cost, 0);
+  assert.equal(usageCost({ inputTokens: -5, outputTokens: Number.NaN }, "deepseek-flash", FRI("12:00"))?.cost, 0);
 });
 
 test("foldTurns groups usage by the turn that produced it", () => {
@@ -129,7 +138,7 @@ test("a message with no usage report is counted as unpriced, not as free", () =>
   ];
   const [turn] = foldTurns(events);
   assert.equal(turn.unpricedMessages, 1);
-  assert.equal(turn.usd, 0);
+  assert.equal(turn.cost, 0);
 });
 
 test("summarizeCost totals the session and reports the last turn", () => {
@@ -143,9 +152,9 @@ test("summarizeCost totals the session and reports the last turn", () => {
   ];
   const summary = summarizeCost({ events, nowMs: now });
   assert.equal(summary.session.turns, 2);
-  assert.equal(summary.session.usd.toFixed(4), (0.15 + 0.6).toFixed(4));
+  assert.equal(summary.session.cost.toFixed(4), (0.15 + 0.6).toFixed(4));
   assert.equal(summary.lastTurn.turn, 2, "the last turn is the one the person's last message started");
-  assert.equal(summary.lastTurn.usd.toFixed(4), "0.6000");
+  assert.equal(summary.lastTurn.cost.toFixed(4), "0.6000");
   assert.equal(summary.session.unpricedTurns, 0);
   assert.equal(summary.recent.windowMs, 15 * 60 * 1000);
 });
@@ -160,8 +169,8 @@ test("the recent window projects a per-hour burn rate from messages inside it", 
   ];
   const summary = summarizeCost({ events, nowMs: now, windowMs });
   assert.equal(summary.recent.messages, 1);
-  assert.equal(summary.recent.usd.toFixed(4), "0.1500");
-  assert.equal(summary.recent.usdPerHour.toFixed(4), "0.6000");
+  assert.equal(summary.recent.cost.toFixed(4), "0.1500");
+  assert.equal(summary.recent.costPerHour.toFixed(4), "0.6000");
 });
 
 test("messages older than the window do not inflate the burn rate", () => {
@@ -170,23 +179,46 @@ test("messages older than the window do not inflate the burn rate", () => {
     { type: "assistant/message", seq: 0, time: now - 90 * 60_000, data: { turn: 1, message: { source: { model: "deepseek-flash" } }, usage: { inputTokens: 1_000_000 } } },
   ];
   const summary = summarizeCost({ events, nowMs: now, windowMs: 15 * 60 * 1000 });
-  assert.equal(summary.recent.usd, 0);
-  assert.equal(summary.recent.usdPerHour, 0);
-  assert.equal(summary.session.usd.toFixed(4), "0.1500", "the session total still counts it");
+  assert.equal(summary.recent.cost, 0);
+  assert.equal(summary.recent.costPerHour, 0);
+  assert.equal(summary.session.cost.toFixed(4), "0.1500", "the session total still counts it");
 });
 
 test("an empty or unreadable log summarises to zeroes instead of throwing", () => {
   const summary = summarizeCost({ events: [], nowMs: FRI("12:00") });
   assert.equal(summary.lastTurn, null);
-  assert.equal(summary.session.usd, 0);
+  assert.equal(summary.session.cost, 0);
   assert.equal(summary.session.turns, 0);
-  assert.equal(summary.recent.usdPerHour, 0);
-  assert.equal(summary.pricingReadOn, "2026-10-02");
+  assert.equal(summary.recent.costPerHour, 0);
+  assert.equal(summary.pricingReadOn, "2026-10-03");
 });
 
-test("convertUsd leaves USD alone and applies the caller's rate otherwise", () => {
-  assert.equal(convertUsd(1, "USD", 7.2), 1);
-  assert.equal(convertUsd(1, "CNY", 7.2), 7.2);
-  assert.equal(convertUsd(1, "CNY", 0), 1, "a missing rate degrades to the raw USD figure");
-  assert.equal(convertUsd(1, "CNY", Number.NaN), 1);
+test("a currency normalises to one DeepSeek prices in", () => {
+  assert.deepEqual(COST_CURRENCIES, ["CNY", "USD"]);
+  assert.equal(normalizeCostCurrency("cny"), "CNY");
+  assert.equal(normalizeCostCurrency(" USD "), "USD");
+  assert.equal(normalizeCostCurrency(undefined), "USD", "an unknown currency falls back to the API's own reporting currency");
+  assert.equal(normalizeCostCurrency("EUR"), "USD");
+});
+
+test("CNY is priced from DeepSeek's published CNY rates, not converted", () => {
+  // Flash off-peak: CNY 1 per 1M uncached in, CNY 0.02 cached, CNY 4 out.
+  const tokens = { inputTokens: 1_000_000, cacheReadTokens: 1_000_000, outputTokens: 1_000_000 };
+  const cny = usageCost(tokens, "deepseek-flash", FRI("12:00"), "CNY");
+  assert.equal(cny?.currency, "CNY");
+  assert.equal(Number(cny?.cost.toFixed(4)), 5.02);
+
+  const usd = usageCost(tokens, "deepseek-flash", FRI("12:00"), "USD");
+  assert.equal(usd?.currency, "USD");
+  assert.equal(Number(usd?.cost.toFixed(4)), 0.753);
+
+  // The published CNY figures are not the USD ones times any rate, which is the
+  // whole reason there is no exchange rate in this plugin.
+  assert.notEqual(Number(cny?.cost.toFixed(2)), Number((usd.cost * 7.2).toFixed(2)));
+});
+
+test("an unknown currency falls back to USD rather than pricing at nothing", () => {
+  const priced = usageCost({ inputTokens: 1_000_000 }, "deepseek-flash", FRI("12:00"), "EUR");
+  assert.equal(priced?.currency, "USD");
+  assert.equal(priced?.cost, 0.15);
 });

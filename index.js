@@ -19,7 +19,7 @@
 //    escapes into the loader.
 
 import { describeHttpFailure, normalizeBalance, pickWallet } from "./lib/balance.js";
-import { convertUsd } from "./lib/cost.js";
+import { COST_CURRENCIES, normalizeCostCurrency } from "./lib/cost.js";
 import { createCostLedger } from "./lib/ledger.js";
 
 /** Base path for this plugin's routes. Owned by the plugin, outside `/api`. */
@@ -34,16 +34,24 @@ const MAX_BODY_BYTES = 64 * 1024;
 const DEFAULT_REFRESH_MS = 60_000;
 const MIN_REFRESH_MS = 15_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
-/** Recent-spend window for the burn-rate warning: short enough to catch a runaway. */
-const DEFAULT_BURN_WINDOW_MS = 15 * 60 * 1000;
-const DEFAULT_BURN_WARN_USD_PER_HOUR = 2;
 /**
- * USD→CNY used only to place a USD-priced estimate beside a CNY balance. This
- * is an approximation and a configurable one: the plugin has no exchange-rate
- * source, and quietly inventing a rate would make a spend warning less
- * trustworthy, not more.
+ * Window for the live burn rate.
+ *
+ * Short on purpose. This is the number that catches a sudden loss, so it has to
+ * be sensitive rather than smooth; the trade is that it reads 0 whenever nothing
+ * has settled recently, which is honest — nothing *is* being spent at that
+ * instant. `averageBurnPerHour` is the stable companion figure.
  */
-const DEFAULT_USD_TO_CNY = 7.2;
+const DEFAULT_BURN_WINDOW_MS = 15 * 1000;
+const MIN_BURN_WINDOW_MS = 5 * 1000;
+/** Per-hour rate above which the panel flags the spend. In the balance's own currency. */
+const DEFAULT_BURN_WARN_PER_HOUR = 2;
+/**
+ * Per-hour rate above which the running turn is interrupted. **0 disables it,
+ * and that is the default**: stopping a task is destructive and the rate is an
+ * estimate, so it has to be asked for.
+ */
+const DEFAULT_TERMINATE_PER_HOUR = 0;
 
 /**
  * Reported in every payload.
@@ -95,13 +103,13 @@ export const Config = Schema?.object({
   endpoint: Schema.string().description("Override the balance endpoint. Meant for testing against a stand-in server."),
   refreshIntervalMs: Schema.natural().min(MIN_REFRESH_MS).default(DEFAULT_REFRESH_MS).description(`How long one balance answer is reused before the next request, in milliseconds (minimum ${MIN_REFRESH_MS}).`),
   requestTimeoutMs: Schema.natural().min(1000).max(120_000).default(DEFAULT_TIMEOUT_MS).description("Deadline for one balance request, in milliseconds."),
-  currency: Schema.string().default("auto").description("Currency to feature in the widget: `auto`, or an explicit code such as `CNY` or `USD`."),
+  currency: Schema.string().default("auto").description("Which wallet to feature, and therefore which currency the cost estimates are priced in: `auto`, `CNY` or `USD`. DeepSeek publishes its rates in CNY and USD, so no exchange rate is involved."),
   allowNonLoopback: Schema.boolean().default(false).description("Allow the widget to read balance when the GUI is served on a non-loopback address. Off by default: the route trusts its host, which is only sound on loopback."),
   costEnabled: Schema.boolean().default(true).description("Estimate what recent turns cost, from the token usage the provider already reports on every assistant message. Costs nothing extra: no API call and no tokens are spent."),
-  burnWindowMs: Schema.natural().min(60_000).default(DEFAULT_BURN_WINDOW_MS).description(`Window for the recent-spend rate, in milliseconds (minimum 60000). This is the runaway warning.`),
-  burnWarnUsdPerHour: Schema.number().min(0).default(DEFAULT_BURN_WARN_USD_PER_HOUR).description("Projected USD per hour above which the panel flags the spend. 0 disables the warning."),
-  usdToCny: Schema.number().min(0).default(DEFAULT_USD_TO_CNY).description("Rate used to express USD API spend beside a CNY balance. An approximation, and yours to set: the plugin has no exchange-rate source."),
-  costCurrency: Schema.string().default("auto").description("Currency to show cost estimates in: `auto` follows the featured balance currency, or an explicit code such as `CNY` or `USD`."),
+  graphEnabled: Schema.boolean().default(true).description("Draw the live-burn chart in the panel: this turn's burn rate against its own elapsed time, with the warn and terminate lines across it."),
+  burnWindowMs: Schema.natural().min(MIN_BURN_WINDOW_MS).default(DEFAULT_BURN_WINDOW_MS).description(`Window for the live burn rate, in milliseconds (minimum ${MIN_BURN_WINDOW_MS}). Short by design: this is the figure that catches a sudden loss, so it is sensitive rather than smooth.`),
+  burnWarnPerHour: Schema.number().min(0).default(DEFAULT_BURN_WARN_PER_HOUR).description("Per-hour spend above which the panel turns amber. In the balance's own currency (CNY for a CNY account, USD for a USD one). 0 disables the warning."),
+  terminateAbovePerHour: Schema.number().min(0).default(DEFAULT_TERMINATE_PER_HOUR).description("Per-hour spend above which the running turn is interrupted, exactly as if you pressed stop. In the balance's own currency. 0 disables it, and 0 is the default: interrupting a task is destructive and the rate is an estimate, so it has to be asked for deliberately."),
 });
 
 /**
@@ -345,57 +353,109 @@ function resolveSettings(rawConfig) {
     currency: String(config.currency ?? "auto").trim() || "auto",
     allowNonLoopback: config.allowNonLoopback === true,
     costEnabled: config.costEnabled !== false,
-    burnWindowMs: Number.isFinite(Number(config.burnWindowMs)) ? Math.max(60_000, Math.trunc(Number(config.burnWindowMs))) : DEFAULT_BURN_WINDOW_MS,
-    burnWarnUsdPerHour: Number.isFinite(Number(config.burnWarnUsdPerHour)) ? Math.max(0, Number(config.burnWarnUsdPerHour)) : DEFAULT_BURN_WARN_USD_PER_HOUR,
-    usdToCny: Number.isFinite(Number(config.usdToCny)) && Number(config.usdToCny) > 0 ? Number(config.usdToCny) : DEFAULT_USD_TO_CNY,
-    costCurrency: String(config.costCurrency ?? "auto").trim() || "auto",
+    graphEnabled: config.graphEnabled !== false,
+    burnWindowMs: Number.isFinite(Number(config.burnWindowMs)) ? Math.max(MIN_BURN_WINDOW_MS, Math.trunc(Number(config.burnWindowMs))) : DEFAULT_BURN_WINDOW_MS,
+    burnWarnPerHour: Number.isFinite(Number(config.burnWarnPerHour)) ? Math.max(0, Number(config.burnWarnPerHour)) : DEFAULT_BURN_WARN_PER_HOUR,
+    terminateAbovePerHour: Number.isFinite(Number(config.terminateAbovePerHour)) ? Math.max(0, Number(config.terminateAbovePerHour)) : DEFAULT_TERMINATE_PER_HOUR,
   };
 }
 
 /**
- * Turn the ledger's USD figures into the payload the panel renders.
+ * Turn the ledger's figures into the payload the panel renders.
  *
- * The exchange rate is applied here rather than in the browser so there is one
- * implementation, and it is the configured one rather than a fetched one: the
- * plugin has no rate source, and a spend warning built on an invented rate is
- * worse than one that says which rate it used.
+ * Amounts are already in the right currency: the ledger prices in the featured
+ * wallet's currency, using DeepSeek's own published rate card for that currency.
+ * Nothing is converted here, which is the point — there is no exchange rate to
+ * get wrong, and no rate for the user to keep up to date.
  *
  * @param {object} summary from the ledger.
  * @param {object} settings
  * @param {object|null} featured the wallet the panel is featuring, for `auto`.
  */
-function costPayload(summary, settings, featured) {
-  const currency = settings.costCurrency === "auto" ? (featured?.currency ?? "USD") : settings.costCurrency.toUpperCase();
-  const toDisplay = (usd) => convertUsd(usd, currency, settings.usdToCny);
+function costPayload(summary, settings, featured, nowMs = Date.now()) {
+  const currency = normalizeCostCurrency(summary.currency ?? featured?.currency);
 
-  const lastTurn = summary.lastTurn;
-  const burn = summary.recent.usdPerHour;
+  const thisTurn = summary.thisTurn;
+
+  /**
+   * The live rate: what the last `burnWindowMs` cost, projected to an hour.
+   *
+   * This is the sudden-loss detector. It is deliberately short and therefore
+   * jumpy — it reads 0 whenever nothing has settled inside the window, which is
+   * true rather than broken, and it moves within seconds of a fan-out starting.
+   */
+  const liveBurnPerHour = summary.recent.costPerHour;
+  /**
+   * The turn's own running average, frozen when the turn closes. Stable, and the
+   * figure worth comparing one task against another.
+   */
+  const averageBurnPerHour = thisTurn !== null ? thisTurn.burnPerHour : 0;
+
+  // Both thresholds are in the balance's own currency, because the amounts are.
+  const warn = settings.burnWarnPerHour > 0 && liveBurnPerHour >= settings.burnWarnPerHour;
+  const overTerminate =
+    settings.terminateAbovePerHour > 0 &&
+    thisTurn !== null &&
+    thisTurn.ended !== true &&
+    liveBurnPerHour >= settings.terminateAbovePerHour;
 
   return {
     available: true,
     sessionId: summary.sessionId,
     currency,
-    usdToCny: settings.usdToCny,
     pricingReadOn: summary.pricingReadOn ?? null,
-    warn: settings.burnWarnUsdPerHour > 0 && burn >= settings.burnWarnUsdPerHour,
-    warnUsdPerHour: settings.burnWarnUsdPerHour,
-    lastTurn:
-      lastTurn === null
+    burnWindowMs: summary.recent.windowMs,
+    graphEnabled: settings.graphEnabled !== false,
+    liveBurnPerHour,
+    liveAmountPerHour: liveBurnPerHour,
+    averageBurnPerHour,
+    averageAmountPerHour: averageBurnPerHour,
+    warn,
+    warnPerHour: settings.burnWarnPerHour,
+    terminateAbovePerHour: settings.terminateAbovePerHour,
+    overTerminate,
+    /**
+     * The server's clock. The panel ticks the elapsed time locally once a
+     * second, and an offset measured once per payload keeps that honest if the
+     * page's clock has drifted from the host's.
+     */
+    serverNow: nowMs,
+    thisTurn:
+      thisTurn === null
         ? null
         : {
-            turn: lastTurn.turn,
-            ended: lastTurn.ended === true,
-            usd: lastTurn.usd,
-            amount: toDisplay(lastTurn.usd),
-            uncachedInputTokens: lastTurn.uncachedInputTokens,
-            cacheReadTokens: lastTurn.cacheReadTokens,
-            outputTokens: lastTurn.outputTokens,
-            messages: lastTurn.messages,
-            models: lastTurn.models.map((entry) => entry.model),
+            turn: thisTurn.turn,
+            ended: thisTurn.ended === true,
+            startedAt: thisTurn.startedAt,
+            endedAt: thisTurn.endedAt,
+            durationMs: thisTurn.durationMs,
+            cost: thisTurn.cost,
+            amount: thisTurn.cost,
+            burnPerHour: thisTurn.burnPerHour,
+            amountPerHour: thisTurn.burnPerHour,
+            uncachedInputTokens: thisTurn.uncachedInputTokens,
+            cacheReadTokens: thisTurn.cacheReadTokens,
+            outputTokens: thisTurn.outputTokens,
+            messages: thisTurn.messages,
+            attempts: thisTurn.attempts,
+            models: thisTurn.models,
+            /** Windowed live-burn samples for the chart, relative to the turn start. */
+            series: thisTurn.series ?? [],
           },
+    /** Closed turns, oldest first, so two finished tasks can be compared. */
+    turns: summary.turns.map((turn) => ({
+      turn: turn.turn,
+      endedAt: turn.endedAt,
+      durationMs: turn.durationMs,
+      cost: turn.cost,
+      amount: turn.cost,
+      burnPerHour: turn.burnPerHour,
+      amountPerHour: turn.burnPerHour,
+      messages: turn.messages,
+    })),
     session: {
-      usd: summary.session.usd,
-      amount: toDisplay(summary.session.usd),
+      cost: summary.session.cost,
+      amount: summary.session.cost,
       turns: summary.session.turns,
       sessions: summary.session.sessions,
       descendants: summary.session.descendants,
@@ -403,13 +463,73 @@ function costPayload(summary, settings, featured) {
     },
     recent: {
       windowMs: summary.recent.windowMs,
-      usd: summary.recent.usd,
-      amount: toDisplay(summary.recent.usd),
-      usdPerHour: burn,
-      amountPerHour: toDisplay(burn),
+      cost: summary.recent.cost,
+      amount: summary.recent.cost,
+      costPerHour: summary.recent.costPerHour,
+      amountPerHour: summary.recent.costPerHour,
       messages: summary.recent.messages,
     },
   };
+}
+
+/** Provenance written into the session log when the plugin stops a turn. */
+const TERMINATE_REASON = "dsh-budget-watcher/over-budget";
+
+/**
+ * Interrupt the running turn of a session, exactly as the stop button does.
+ *
+ * This is the same primitive the UI reaches: the client's cancel is only a
+ * Remote wrapper around `agent.cancel(...)`, so calling it directly needs no
+ * Remote carrier and no client round trip. The cause is `hook` rather than
+ * `user` so the session log records *why* the turn ended — `hook` is the only
+ * cause that carries a provenance string, and `dsh-deepseek-account` sets the
+ * same precedent for a programmatic stop.
+ *
+ * The turn guard is advisory, and deliberately so: an `Agent` outlives any one
+ * turn, so holding a reference identifies the agent, not the turn. Sampling the
+ * open-turn boundary immediately either side of the call cannot make the stop
+ * atomic — nothing in the API can cancel "turn N" — but it does turn a silent
+ * wrong-turn abort into a logged raced one.
+ *
+ * @returns {{ok: boolean, why: string, turn?: number}}
+ */
+function stopRunningTurn(ctx, sessionId, reason) {
+  const agents = ctx.get("agents");
+  if (agents === undefined) return { ok: false, why: "agents-unavailable" };
+
+  let agent;
+  try {
+    agent = agents.get(sessionId);
+  } catch {
+    return { ok: false, why: "lookup-failed" };
+  }
+  if (agent === undefined) return { ok: false, why: "not-attached" };
+  if (agent.status !== "running") return { ok: true, why: "already-idle" };
+
+  const boundaryOf = () => {
+    try {
+      return ctx.get("sessionProjections")?.stateOf(agent.session, "turnBoundary");
+    } catch {
+      return undefined;
+    }
+  };
+  const before = boundaryOf();
+  // No open turn means there is nothing to stop, and cancelling an idle agent
+  // would only risk clearing queued input.
+  if (before === undefined || before.openTurnStartSeq === null || before.openTurnStartSeq === undefined) {
+    return { ok: true, why: "no-open-turn" };
+  }
+  const turn = before.lastTurn;
+
+  // `keepInbox` preserves queued and steering input: stopping a runaway must not
+  // also silently discard what the user already typed.
+  agent.cancel({ kind: "hook", reason }, { keepInbox: true });
+
+  const after = boundaryOf();
+  if (after !== undefined && after.lastTurn !== turn) {
+    return { ok: true, why: "raced-next-turn", turn };
+  }
+  return { ok: true, why: "cancelled", turn };
 }
 
 /**
@@ -469,10 +589,10 @@ const EDITABLE = {
   currency: "string",
   allowNonLoopback: "boolean",
   costEnabled: "boolean",
+  graphEnabled: "boolean",
   burnWindowMs: "number",
-  burnWarnUsdPerHour: "number",
-  usdToCny: "number",
-  costCurrency: "string",
+  burnWarnPerHour: "number",
+  terminateAbovePerHour: "number",
 };
 
 /**
@@ -493,10 +613,10 @@ function settingsPayload(settings, extras) {
       currency: settings.currency,
       allowNonLoopback: settings.allowNonLoopback,
       costEnabled: settings.costEnabled,
+      graphEnabled: settings.graphEnabled,
       burnWindowMs: settings.burnWindowMs,
-      burnWarnUsdPerHour: settings.burnWarnUsdPerHour,
-      usdToCny: settings.usdToCny,
-      costCurrency: settings.costCurrency,
+      burnWarnPerHour: settings.burnWarnPerHour,
+      terminateAbovePerHour: settings.terminateAbovePerHour,
     },
     apiKeySet: settings.apiKey !== "",
     ...extras,
@@ -627,11 +747,32 @@ function apply(ctx, config) {
 
   const reader = createReader(ctx, settings, settings.provider ?? { id: settings.providerId, label: settings.providerId });
 
+  // The "terminate above" latch: set to the turn number already stopped, so one
+  // runaway turn is interrupted once rather than once per poll.
+  let terminatedTurn = null;
+  let terminated = null;
+
   // Reads the live agent tree to price what recent turns actually cost. It
   // spends no tokens of its own: every figure comes from the usage the provider
   // already reported and DSH already logged.
+  //
+  // The currency is supplied as a getter rather than a value because it is not
+  // known until the first balance read, which happens long after this ledger is
+  // built.
+  //
+  // An explicit `currency` setting wins outright here. That is the point of the
+  // setting: choosing USD means the figures are shown in USD, whether or not the
+  // account happens to hold a USD wallet. Only `auto` defers to whichever wallet
+  // is on screen. (This previously ignored the setting and followed the featured
+  // wallet, which meant picking USD on a CNY-only account silently did nothing.)
+  const costCurrencyNow = () =>
+    settings.currency === "auto" ? normalizeCostCurrency(reader.state().featured?.currency) : normalizeCostCurrency(settings.currency);
   const ledger = settings.costEnabled
-    ? createCostLedger({ getSessions: () => liveSessionsOf(ctx), windowMs: settings.burnWindowMs })
+    ? createCostLedger({
+        getSessions: () => liveSessionsOf(ctx),
+        windowMs: settings.burnWindowMs,
+        getCurrency: costCurrencyNow,
+      })
     : undefined;
 
   /**
@@ -697,9 +838,29 @@ function apply(ctx, config) {
             ctx.logger?.warn?.(`[${name}] cost estimate failed: ${String(error)}`);
             cost = { available: false, reason: "failed" };
           }
+
+          // The "terminate above" action. Fire-and-forget on purpose: stopping a
+          // turn must not make this route slow, and the abort is synchronous at
+          // the call site anyway.
+          if (cost !== null && cost.overTerminate === true && cost.thisTurn !== null) {
+            const turn = cost.thisTurn.turn;
+            if (terminatedTurn !== turn) {
+              // Latched before the call so a poll arriving mid-abort cannot fire
+              // a second one, and keyed by turn so a later turn can still be
+              // stopped.
+              terminatedTurn = turn;
+              terminated = { turn, at: Date.now(), reason: TERMINATE_REASON, liveBurnPerHour: cost.liveBurnPerHour, above: settings.terminateAbovePerHour };
+              const outcome = stopRunningTurn(ctx, cost.sessionId, TERMINATE_REASON);
+              terminated.outcome = outcome.why;
+              ctx.logger?.warn?.(
+                `[${name}] live burn ${cost.liveBurnPerHour.toFixed(2)}/h is over the ${settings.terminateAbovePerHour}/h limit: ` +
+                  `interrupted turn ${turn} of ${cost.sessionId} (${outcome.why})`,
+              );
+            }
+          }
         }
 
-        sendJson(res, 200, { ...state, cost, settings: currentSettings() });
+        sendJson(res, 200, { ...state, cost, terminated, settings: currentSettings() });
       },
     });
 
