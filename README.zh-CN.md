@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 这是给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（简称 `dsh`）写的一个插件。
-它会在对话窗口的上面浮一个小面板，让你随时看到两件事：**API 账户里还剩多少钱**，以及**刚才跑的这几轮对话到底花了多少**。
+它会在对话窗口的上面浮一个小面板，让你随时看到：**API 账户里还剩多少钱**，**刚才跑的这几轮对话到底花了多少**，以及**执行任务花钱的速率有多块**。
 
 ![展开后的面板](docs/screenshotnew.png)
 
