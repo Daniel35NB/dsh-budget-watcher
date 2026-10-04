@@ -101,7 +101,7 @@ export const Config = Schema?.object({
   apiKey: Schema.string().role("secret").description("Explicit API key. When empty, the key is resolved from the credential reference below."),
   apiKeyEnv: Schema.string().default("DEEPSEEK_API_KEY").description("Credential reference holding the API key, resolved through the credentials service."),
   endpoint: Schema.string().description("Override the balance endpoint. Meant for testing against a stand-in server."),
-  refreshIntervalMs: Schema.natural().min(MIN_REFRESH_MS).default(DEFAULT_REFRESH_MS).description(`How long one balance answer is reused before the next request, in milliseconds (minimum ${MIN_REFRESH_MS}).`),
+  refreshIntervalMs: Schema.natural().min(MIN_REFRESH_MS).default(DEFAULT_REFRESH_MS).description(`How long the host reuses one balance answer before calling DeepSeek again, in milliseconds (minimum ${MIN_REFRESH_MS}). This governs the upstream API call, not how often the panel polls — the panel polls its own local route every few seconds so a new turn is noticed promptly.`),
   requestTimeoutMs: Schema.natural().min(1000).max(120_000).default(DEFAULT_TIMEOUT_MS).description("Deadline for one balance request, in milliseconds."),
   currency: Schema.string().default("auto").description("Which wallet to feature, and therefore which currency the cost estimates are priced in: `auto`, `CNY` or `USD`. DeepSeek publishes its rates in CNY and USD, so no exchange rate is involved."),
   allowNonLoopback: Schema.boolean().default(false).description("Allow the widget to read balance when the GUI is served on a non-loopback address. Off by default: the route trusts its host, which is only sound on loopback."),

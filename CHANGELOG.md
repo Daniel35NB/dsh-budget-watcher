@@ -11,6 +11,52 @@ section of the README's [Known limitations](README.md#known-limitations) it move
 
 Nothing yet.
 
+## [0.6.3] — 2026-10-03
+
+The panel looked frozen until you pressed refresh.
+
+### Fixed
+
+- **The client was polling on the host's balance-cache window.** `refreshIntervalMs` (60 s by default) says how
+  long the *host* reuses one balance answer before calling DeepSeek again; the client had adopted it as its own
+  poll interval. So a prompt sent just after a poll went unnoticed for up to a minute, and because the first
+  tightened poll only happened after that, the figures appeared to need a manual refresh — even though the host
+  was folding the ledger correctly the whole time and would have answered instantly. The two intervals are now
+  separate: **the panel polls its own local route every 2 s while a turn runs and every 3 s when idle**, and
+  `refreshIntervalMs` paces only the upstream API call. The host route is cheap to poll because the ledger
+  reuses folds it has already done and the balance comes from the cache.
+- **The setting is relabelled `Balance cache (seconds)`** in the settings tab. Its old label, "Refresh
+  interval", is what invited the conflation in the first place.
+- A troubleshooting row for the symptom, and limitation 6 rewritten to state both intervals and keep them
+  distinct.
+
+### Added
+
+- **`README.zh-CN.md`, a Simplified Chinese README.** It introduces the burn concept in Chinese — 「烧」 for burn,
+  defined on first use as **成本燃烧率** (cost burn rate, i.e. money per unit time) — and then uses 烧 throughout
+  for `live burn`, `average burn` and burn rate. Linked both ways from the two files, and added to `files` so it
+  ships with the package. The English README remains authoritative where the two differ.
+- The client test harness now records `setInterval` delays instead of discarding them, which is what makes the
+  cadence testable. Three assertions: idle polling is seconds and never the 60 s window, a 10-minute cache does
+  not mean a 10-minute poll, and a running turn polls fastest.
+
+### Documentation
+
+Carried in from the previous round, which was never committed — it lands with this version.
+
+- **Both screenshots in `docs/` are replaced with captures of `0.6.2`**: the expanded panel and, new, the
+  collapsed pill. The stale-capture warning is gone, and the pill is now shown in the README rather than only
+  described.
+- **"What it shows" is rewritten from the screenshot's own numbers** — `¥51.33 CNY`, `this turn ≈¥0.12 /
+  ¥13.93 · 22 turns`, `live burn ≈¥0.00/h`, `average burn ≈¥6.40/h · 1:09`, `1 turn(s) unpriced` — so every
+  example in the table is a real reading rather than an invented one.
+- **Two claims in the introduction were false and are corrected.** It said the balance shown is
+  `topped_up_balance` "the money you actually paid in", and that the granted/topped-up split lives behind the
+  gear button. Neither is true: the headline is `total_balance`, and the split is not rendered anywhere. The
+  same wrong claim in a `lib/client.cjs` comment is fixed too.
+- **"Verified against" records the third screenshot round**, which confirmed the `0.6.2` fixes, and narrows what
+  remains unseen to the settings tab's scrolling and pinned Save (`0.5.1`) and the red stop line.
+
 ## [0.6.2] — 2026-10-03
 
 The panel was wide because the chart was setting its width, not the text.
@@ -506,7 +552,8 @@ API-key balance is not the signed-in Platform account balance; the route is loop
 `allowNonLoopback` is set; polling rather than push, with a 15 s floor; and a new install requires a profile
 restart.
 
-[Unreleased]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/NeutronStar714/dsh-budget-watcher/compare/v0.5.2...v0.6.0

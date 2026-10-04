@@ -99,13 +99,20 @@ async function loadPlugin(options = {}) {
     head: { appendChild: (element) => styles.push(element) },
   };
 
+  // The delays are recorded, not discarded: the poll cadence is the difference
+  // between noticing a prompt in seconds and looking frozen until someone presses
+  // refresh, and that is worth asserting.
+  const intervalDelays = [];
   const window = {
     __ModuleLoader__: { load: (registration) => registrations.push(registration) },
     localStorage: {
       getItem: (key) => (storage.has(key) ? storage.get(key) : null),
       setItem: (key, value) => storage.set(key, String(value)),
     },
-    setInterval: () => 1,
+    setInterval: (_fn, delay) => {
+      intervalDelays.push(delay);
+      return intervalDelays.length;
+    },
     clearInterval: () => {},
     innerWidth: 1280,
     innerHeight: 800,
@@ -132,7 +139,7 @@ async function loadPlugin(options = {}) {
     throw new Error(`unexpected require(${JSON.stringify(specifier)})`);
   });
 
-  return { registration, moduleExports, styles, storage, fetchCalls, document };
+  return { registration, moduleExports, styles, storage, fetchCalls, document, intervalDelays };
 }
 
 const HOST_STATE = {
@@ -583,6 +590,46 @@ test("the chart is absent when there is no turn to draw", async () => {
   assert.equal(findByClass(render(component, store).tree, "dshbw-chart"), undefined);
 });
 
+test("the panel polls every few seconds when idle, so a new prompt is noticed", async () => {
+  // The bug this locks out: the client used the host's balance-cache window as its
+  // poll interval, so with the default 60 s a prompt sent just after a poll went
+  // unnoticed for up to a minute and the panel looked frozen until someone pressed
+  // refresh. The two are different things and must not be wired together.
+  const idle = await mount({ state: { ...HOST_STATE, cost: { ...COST, thisTurn: null } } });
+  render(idle.component, idle.store);
+  await settle();
+  // A second render is what re-runs the polling effect against the fetched payload.
+  render(idle.component, idle.store);
+  assert.equal(
+    idle.intervalDelays.includes(3000),
+    true,
+    `idle polling must be seconds, not the 60 s balance window (saw ${JSON.stringify(idle.intervalDelays)})`,
+  );
+  assert.equal(idle.intervalDelays.includes(60000), false, "and must never adopt the cache window");
+
+  // A high configured cache window must not slow the poll down either.
+  const slowCache = await mount({
+    state: { ...HOST_STATE, refreshIntervalMs: 600_000, cost: { ...COST, thisTurn: null } },
+  });
+  render(slowCache.component, slowCache.store);
+  await settle();
+  render(slowCache.component, slowCache.store);
+  assert.equal(slowCache.intervalDelays.includes(3000), true, "a 10-minute cache does not mean a 10-minute poll");
+  assert.equal(slowCache.intervalDelays.includes(600_000), false);
+});
+
+test("the poll tightens while a turn is running", async () => {
+  const running = await mount({ state: { ...HOST_STATE, cost: COST } });
+  render(running.component, running.store);
+  await settle();
+  render(running.component, running.store);
+  assert.equal(
+    running.intervalDelays.includes(2000),
+    true,
+    `a running turn polls fastest (saw ${JSON.stringify(running.intervalDelays)})`,
+  );
+});
+
 test("a burning session is called out, and the pill keeps the warning when collapsed", async () => {
   const warnCost = { ...COST, warn: true };
   const expanded = await mount({ state: { ...HOST_STATE, cost: warnCost } });
@@ -917,7 +964,10 @@ test("the settings tab renders the running configuration as editable fields", as
   // comes from the cost payload rather than being assumed.
   assert.match(text, /Warn above \(CNY\/hour\)/);
   assert.match(text, /Terminate above \(CNY\/hour, 0 = off\)/);
-  assert.match(text, /Refresh interval \(seconds\)/);
+  assert.match(text, /Balance cache \(seconds\)/);
+  // The old label said "refresh interval", which invited the reading that it paces
+  // the panel. It paces the host's upstream call, and the panel polls on its own.
+  assert.doesNotMatch(text, /Refresh interval \(seconds\)/);
   assert.match(text, /Save/);
   // The currency is a closed set, because DeepSeek only publishes rates in two.
   assert.doesNotMatch(text, /USD \u2192 CNY rate/, "no exchange rate is needed or offered");

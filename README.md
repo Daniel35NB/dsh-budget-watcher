@@ -1,18 +1,25 @@
 # dsh-budget-watcher
 
+**English** | [简体中文](README.zh-CN.md)
+
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin that floats a small
-window over the conversation showing **how much topped-up balance is left on your API account** — and **what
-the turns you just ran actually cost**.
+window over the conversation showing **how much balance is left on your API account** — and **what the turns
+you just ran actually cost**.
 
-![The budget watcher floating over a conversation](docs/screenshot.png)
+![The expanded panel floating over a conversation](docs/screenshot.png)
 
-*Captured against 0.2.0, so it is now several revisions stale: the `topped up` caption and the `total …
-granted …` row shown here were removed in 0.3.0, and the single `burn` row became `live burn` and
-`average burn` in 0.5.0. A fresh capture is owed.*
+*The expanded panel on a real account: the balance, this turn's cost beside the conversation's, both burn
+rates, and the live-burn chart drawn against the turn's own elapsed time. Captured at `0.6.2`.*
 
-The balance is `topped_up_balance` from DeepSeek's public balance API — the money you actually paid in, not
-the promotional credit that expires. When the two differ, the widget shows the split so a balance of `0.00`
-next to an account that still works is not a mystery.
+![The same watcher collapsed to a pill](docs/screenshot_pill.png)
+
+*Collapsed to a pill — one click, or a double-click on the header — it leaves only the status dot and the
+amount. The dot keeps its colour, so a spend warning survives the collapse.*
+
+The headline is `total_balance` from DeepSeek's public balance API: **topped-up money plus granted credit**,
+which is the number that decides whether the next call works. The two parts are not shown separately — one
+figure is the honest report, because `topped_up_balance` alone reads `0.00` on an account living on granted
+credit and would say "broke" about an account that is working fine.
 
 The cost figures are computed from the token usage DeepSeek already reports on every assistant message, which
 DSH already records. **They spend no tokens of their own: no model call, no extra request, no estimation
@@ -26,25 +33,27 @@ prompt.** See [What it costs you](#what-it-costs-you).
 
 ## What it shows
 
+Every figure below is read off the screenshot above, so the examples are real rather than illustrative.
+
 | Element | Meaning |
 | --- | --- |
-| `¥21.61 CNY` | `total_balance` — the whole balance: topped-up money **plus** granted credit. The headline, and the only balance row. |
+| `¥51.33 CNY` | `total_balance` — the whole balance: topped-up money **plus** granted credit. The headline, and the only balance row. |
 | Green dot | `is_available: true` — the account can make API calls. |
 | Amber dot | The balance is stale, the last check failed, `is_available` is `false`, or the live burn is over the warning threshold. |
 | **Red dot** | The spend limit was crossed and the plugin **interrupted the turn**. Reserved for that one event. |
 | Red dot (other) | Nothing could be read and no previous value is on screen. |
-| `1 min ago` | When the host last got an answer. A stale number is labelled, never passed off as current. |
-| `this turn ≈¥0.78 / ¥13.05 · 19 turns` | The turn you are waiting on, and after the slash the whole conversation — including the agents either of them spawned. One row, because "what this cost" and "what it all costs" is one thought. |
-| `live burn ≈¥60.48/h · 15s` | What the last window cost, projected per hour. The sudden-loss figure, and the one both thresholds act on. A pulsing dot marks a turn still in flight. |
-| `average burn ≈¥26.35/h · 0:30` | That turn's cost over its elapsed time — a running average, frozen the moment the turn ends. |
-| The chart | This turn's live burn against its own elapsed time, with the warn and stop lines drawn across it. Blue is the rate, amber the warning, red the stop. |
+| `just now` | When the host last got an answer. A stale number is labelled, never passed off as current. |
+| `this turn ≈¥0.12 / ¥13.93 · 22 turns` | The turn you are waiting on, and after the slash the whole conversation — including the agents either of them spawned. One row, because "what this cost" and "what it all costs" is one thought. |
+| `live burn ≈¥0.00/h · 15s` | What the last 15 seconds cost, projected to an hour. The sudden-loss figure, and the one both thresholds act on. It reads `¥0.00/h` here because nothing settled inside those 15 seconds — a true reading, not a fault. A pulsing dot marks a turn still in flight. |
+| `average burn ≈¥6.40/h · 1:09` | That turn's cost over its own elapsed time: ¥0.12 across 1 min 9 s. A running average, frozen the moment the turn ends. |
+| The chart | `live burn` against the turn's elapsed time, `0:00 → 1:09`. The blue line is anchored at the origin — nothing had been spent yet — and the amber `warn ¥15` line is the warning threshold. |
+| `1 turn(s) unpriced` | A model with no published rate was seen, so those turns are reported rather than costed at a guess. |
 | `session ¥15.12 · 4 turns` | The conversation total on a row of its own — only when there is no turn yet to pair it with. |
-| `2 turn(s) unpriced` | A model with no published rate was seen, so those turns are reported rather than costed at a guess. |
 | `Not available for API calls` | `is_available: false`. |
 | `No API key is configured…` | The host found no key; the message names the credential reference to set. |
 
 The header already says *DeepSeek balance*, so the amount carries no caption and there is no second balance
-line. The granted/topped-up split — and every setting — lives behind the gear button.
+line. Every setting lives behind the gear button.
 
 ## What it costs you
 
@@ -223,7 +232,7 @@ A patch replaces the row's whole `config` object, so keep every override togethe
 | `apiKey` | *(empty)* | An explicit key. Prefer `apiKeyEnv`: a key written here lives in your profile file. |
 | `apiKeyEnv` | `DEEPSEEK_API_KEY` | Credential reference resolved through `ctx.credentials`. |
 | `endpoint` | *(the provider's)* | Override the balance endpoint. Intended for testing against a stand-in server. |
-| `refreshIntervalMs` | `60000` | How long one answer is reused before the next request. Minimum `15000`. |
+| `refreshIntervalMs` | `60000` | How long the host reuses one balance answer before calling DeepSeek again. Minimum `15000`. This paces the **upstream API call**, not the panel — see [Known limitations](#known-limitations). |
 | `requestTimeoutMs` | `10000` | Deadline for one balance request. |
 | `currency` | `auto` | Which currency the **cost figures and both thresholds** are shown in. `auto` follows the featured balance wallet; `CNY` or `USD` force it. A closed set, because DeepSeek publishes rates in exactly those two currencies. |
 | `allowNonLoopback` | `false` | Allow the widget to read balance when the GUI is served on a non-loopback address. |
@@ -250,7 +259,7 @@ The panel's **gear button** opens a *Budget* tab in DSH's right sidebar: every o
 field, with Save. The gear only appears when a tab could actually be registered, so it is never a control that
 does nothing.
 
-Durations are shown in the units you think in — the refresh interval and the live burn window in **seconds** —
+Durations are shown in the units you think in — the balance cache and the live burn window in **seconds** —
 and converted back on save. The API key field is write-only: it starts blank, blank means *leave it alone*, and
 clearing it removes the key from the profile. The running key value is never sent to the page; the form only
 knows whether one is set.
@@ -332,7 +341,9 @@ for config validation, is dynamic and degrades to unvalidated config rather than
 | `lib/client.cjs` | Client half: the floating window, drag/collapse state, session handshake, polling, and the panel stylesheet. |
 | `cordis.patch.yml` | The bundle patch inserting the loader row. |
 | `test/` | `node --test` suite: `balance`, `cost`, `ledger`, `host` (the route against a stubbed API) and `client` (the bundle in a VM with a stubbed loader). |
-| `docs/screenshot.png` | The widget running in a real browser. |
+| `docs/screenshot.png` | The expanded panel, captured at `0.6.2` on a real account. |
+| `docs/screenshot_pill.png` | The same watcher collapsed to a pill, captured at `0.6.2`. |
+| `README.zh-CN.md` | 简体中文翻译。The English file is authoritative where the two differ. |
 
 ## Development
 
@@ -360,7 +371,8 @@ restart, and edits to `lib/client.cjs` are served on the next request.
 | `DeepSeek rejected the API key` | The key is wrong, revoked, or belongs to a different account. |
 | `Could not reach api.deepseek.com` | Offline, or a proxy that DSH's global dispatcher does not know about. See [Known limitations](#known-limitations). |
 | `forbidden: host is not a loopback authority` | You reached the GUI through a LAN name or a non-loopback reverse proxy. Set `allowNonLoopback: true` only if you accept that the route is then reachable by anyone who can reach that address. |
-| The number never changes | `refreshIntervalMs` has not elapsed and no window asked for a forced refresh. The relative timestamp tells you when it last moved. |
+| The number never changes | `refreshIntervalMs` has not elapsed, so the host is still serving the cached answer. The relative timestamp tells you when it last moved. |
+| The cost figures do not appear when you send a prompt | Fixed in `0.6.3`. Before that the panel polled on the balance-cache window, so a prompt sent just after a poll could go unnoticed for a minute. If it still happens, the host is on a stale module — check `pluginVersion` and restart DSH. |
 | No cost rows at all | Check `cost.reason` in `GET /dsh-budget-watcher/balance`: `disabled` means `costEnabled: false`; `no-live-sessions` means no session is live in the host process; `failed` means the ledger threw and the warning is in the dsh log. If `pluginVersion` is missing from that response, the host is running a **stale module** — restart DSH. |
 | Balance shows but a feature you just added does not | The host module was imported before your edit and is cached. Restart DSH; see limitation 14. |
 | `N turn(s) unpriced` | A turn ran on a model missing from the rate card. Add it to `PRICING` in `lib/cost.js`, or ignore it if you know that turn was not a DeepSeek one. |
@@ -387,8 +399,11 @@ Recorded honestly, because each one is a decision rather than an oversight.
    then whatever came first). The rest are not shown.
 5. **Amounts are strings and are never arithmetic.** DeepSeek documents all three amounts as decimal strings.
    The widget prints what it received, so `total` is displayed as returned rather than recomputed.
-6. **Polling, not push.** There is no SSE stream; the panel polls and the host caches. The minimum interval is
-   15 s and the default is 60 s, which keeps the request rate low on an endpoint with no published rate limit.
+6. **Polling, not push.** There is no SSE stream, so the panel polls. Two different intervals are involved and
+   they are deliberately separate: the **panel** polls its own local host route every few seconds (2 s while a
+   turn runs, 3 s when idle) so a prompt is noticed promptly, while `refreshIntervalMs` — 15 s minimum, 60 s
+   default — is how long the **host** reuses one balance answer before calling DeepSeek. Conflating the two was
+   the `0.6.3` bug: the panel inherited a 60 s poll and looked frozen until the refresh button was pressed.
 7. **The route is unauthenticated beyond its fence.** It is not on DSH's authenticated `/api` prefix, so the
    plugin applies its own loopback + same-origin checks. It returns a balance figure and never a credential.
    If your deployment sets a non-loopback bind host, the route answers to that network unless you leave
@@ -577,10 +592,14 @@ Recorded honestly, because each one is a decision rather than an oversight.
 ## Verified against
 
 - DSH `0.2.0-rc.2` on Windows, installed with `dsh plugin --profile <name> add link:<path>`.
+- **Two screenshots of the running panel at `0.6.2`**, both in `docs/` and both used in this README: the expanded
+  panel and the collapsed pill. Everything the element table above describes is visible in them, and they were
+  taken from a real account with a real balance — `¥51.33 CNY`, a turn of `≈¥0.12`, a conversation of `¥13.93`
+  across 22 turns.
 - A live `GET /user/balance` for a real account, read both directly from the route and through the panel in a
-  real browser, where the returned `topped_up_balance` rendered, and the collapse-to-pill and expand-back
-  toggle, the accessible labels and the relative timestamp were exercised. Dragging and the refresh control
-  are covered by the test suite rather than by a browser gesture.
+  real browser, where the collapse-to-pill and expand-back toggle, the accessible labels and the relative
+  timestamp were exercised. Dragging and the refresh control are covered by the test suite rather than by a
+  browser gesture.
 - The session handshake observed in real network traffic: a root-scoped `shell.overlay` entry does receive
   `useSessions`, and the panel's poll is issued as
   `GET /dsh-budget-watcher/balance?session=session-…` once a session exists.
@@ -590,15 +609,15 @@ Recorded honestly, because each one is a decision rather than an oversight.
   `$0.1236`, matching the published rates to the cent.
 - A real settings write end to end: `POST /dsh-budget-watcher/config` on a running profile put the row's
   `config` into that profile's `cordis.patch.yml`, and re-reading the payload showed the new values effective.
-- `node --test`, **129 tests** covering the payload normalizer, the cost model and **both rate cards**, the
+- `node --test`, **131 tests** covering the payload normalizer, the cost model and **both rate cards**, the
   session ledger (fan-out, descendants, finish-must-not-subtract, wrong-session isolation, per-turn burn,
   frozen duration and **the windowed burn series**), the route (caching, single flight, `?refresh=1`, the fence,
   the config write, the cost payload, **the terminate path firing once and only once**, every failure mode) and
   the client bundle (registration shape, slot mounting, drag scoping, session handshake, live versus average
   burn, the settings form's scroll container and pinned Save, **the chart's polyline, thresholds, on/off switch,
   the absence of a stop line at `0`, the caption fills, the one-precision axis, the axis-origin anchor and the
-  containment that stops the chart widening the panel**, **the combined turn/session row**, rendering per host
-  state, unmount cleanup).
+  containment that stops the chart widening the panel**, **the combined turn/session row**, **the poll cadence
+  being seconds rather than the 60 s balance window**, rendering per host state, unmount cleanup).
 - **Two real browser screenshots** of the running panel. The first found the fixed-size chart, the invisible
   black threshold caption and the mixed-precision axis. The second found that the chart was still setting the
   panel's width: `<svg>` is a replaced element with a 300×150 intrinsic size, so its default width — not the
@@ -610,15 +629,17 @@ Recorded honestly, because each one is a decision rather than an oversight.
   programmatic `hook`-caused stop.
 
 > [!NOTE]
-> **The chart has been seen running twice**, and both times the screenshot found what tests could not. The first
-> showed a chart at full panel width, a threshold caption rendering black on the dark theme (an SVG `<text>` with
-> no `fill` defaults to black), and an axis mixing `¥10` with `¥5.00`. The second showed the panel was still too
-> wide — the chart's 300 px intrinsic width, not the text, was setting it.
+> **Three rounds of screenshots, and every round found something no assertion could.** The first showed a chart
+> at full panel width, a threshold caption rendering black on the dark theme (an SVG `<text>` with no `fill`
+> defaults to black), and an axis mixing `¥10` with `¥5.00`. The second showed the panel was still too wide —
+> the chart's 300 px intrinsic width, not the text, was setting it. The third, at `0.6.2` and linked above,
+> confirms all of it: the chart spans the panel and starts at the origin, the `warn ¥15` caption is legible, the
+> axis reads `¥0 / ¥5 / ¥10 / ¥15`, and the panel is narrow.
 >
-> Those are fixed and now asserted, but the *fixes* have not been seen. Still **test-verified only**: the live
-> per-second burn and the turn-comparison table (0.4.0), the settings form's scrolling and pinned Save (0.5.1),
-> and the chart's width and origin anchor (0.6.2). Tests can prove the elements and the CSS rules exist; only
-> eyes can say whether they *look* right — which this project has now learned three times.
+> Still **test-verified only**, and honestly so: the settings form's scrolling and pinned Save (`0.5.1`) — no
+> screenshot has shown that tab yet — and the **red** stop line, which needs `terminateAbovePerHour` above `0`
+> and has not been seen firing. Tests can prove elements and CSS rules exist; only eyes can say whether they
+> *look* right, which this project has now learned three times over.
 
 ## Changelog
 
