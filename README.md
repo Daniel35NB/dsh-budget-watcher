@@ -6,7 +6,7 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) pl
 window over the conversation showing **how much balance is left on your API account** — and **what the turns
 you just ran actually cost**.
 
-![The expanded panel floating over a conversation](docs/screenshot.png)
+![The expanded panel floating over a conversation](docs/screenshotnew.png)
 
 *The expanded panel on a real account: the balance, this turn's cost beside the conversation's, both burn
 rates, and the live-burn chart drawn against the turn's own elapsed time. Captured at `0.6.2`.*
@@ -341,7 +341,7 @@ for config validation, is dynamic and degrades to unvalidated config rather than
 | `lib/client.cjs` | Client half: the floating window, drag/collapse state, session handshake, polling, and the panel stylesheet. |
 | `cordis.patch.yml` | The bundle patch inserting the loader row. |
 | `test/` | `node --test` suite: `balance`, `cost`, `ledger`, `host` (the route against a stubbed API) and `client` (the bundle in a VM with a stubbed loader). |
-| `docs/screenshot.png` | The expanded panel, captured at `0.6.2` on a real account. |
+| `docs/screenshotnew.png` | The expanded panel, captured at `0.6.2` on a real account. Named `screenshotnew` rather than `screenshot` so GitHub serves the current image instead of a cached copy of the previous one. |
 | `docs/screenshot_pill.png` | The same watcher collapsed to a pill, captured at `0.6.2`. |
 | `README.zh-CN.md` | 简体中文翻译。The English file is authoritative where the two differ. |
 

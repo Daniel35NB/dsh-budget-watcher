@@ -9,7 +9,18 @@ section of the README's [Known limitations](README.md#known-limitations) it move
 
 ## [Unreleased]
 
-Nothing yet.
+Documentation only — no code changed, so this carries no version of its own.
+
+### Documentation
+
+- **The main screenshot is renamed `docs/screenshotnew.png`.** GitHub kept serving the previous image from its cache
+  under the old `docs/screenshot.png` URL, so the repo page still showed a superseded panel after the file was
+  replaced. A new filename is the only reliable cache-bust for a committed image; `docs/screenshot.png` is deleted
+  and both READMEs point at the new name. The Files table says why the name is odd, so nobody "tidies" it back.
+- **`README.zh-CN.md` rewritten in a human voice.** The first pass read as translated rather than written —
+  compressed four-character compounds and literal English calques ("天生抖动", "取短窗口"). It now reads as
+  Chinese prose: 烧 is still the term for burn, introduced once as 成本燃烧率, but the explanations run as
+  sentences instead of stacked noun phrases. Same content and all 55 limitations; only the register changed.
 
 ## [0.6.3] — 2026-10-03
 
